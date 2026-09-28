@@ -1,0 +1,7 @@
+.venv/
+models/
+__pycache__/
+*.pyc
+settings.json
+settings.json.tmp
+.ytubecatcher_tmp/
