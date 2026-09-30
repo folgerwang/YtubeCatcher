@@ -36,6 +36,9 @@ Both lists are kept between sessions, and thumbnails are cached.
 
 Click the **folder button** next to the search button (or press <kbd>Ctrl</kbd>+<kbd>O</kbd>) and pick a video or audio file: MP4, MKV, WEBM, MOV, AVI, MP3, M4A, WAV, FLAC and more. You can also paste a file path into the search box. Local files work like YouTube videos: mark clips, take screenshots, and extract voice only, audio or video. They also appear in *Recent*, with a thumbnail taken from the video.
 
+### Cache ahead: smooth seeking
+The **Cache** chip in the control bar (on by default) keeps downloading the video ahead of where you're watching, and keeps the part you've already watched. The seek bar shows the downloaded part in light grey, and the chip shows how much is ready (`Cached +2:31`, or `Cached all`). Jumping around inside the downloaded part is instant. YouTube sends a normal stream at about playback speed, so the app fetches it in short ranged pieces at full download speed instead. A typical video is fully cached within seconds. The cache is kept in a temporary file, not in memory. Click the chip to turn it off if you only want a short buffer, for example on a metered connection.
+
 ### Screenshots of any frame
 
 <img src="docs/screenshots/screenshot-bar.png?v=3" alt="Camera button in the control bar and a saved screenshot in the output list" width="100%">

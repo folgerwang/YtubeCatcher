@@ -24,6 +24,16 @@ APP_NAME = "YtubeCatcher"
 VIEWER_SETTINGS = os.path.join(HERE, "viewer_settings.json")
 QUALITIES = ["360", "480", "720", "1080", "1440", "2160", "audio only"]
 SPEEDS = ["0.5", "0.75", "1.0", "1.25", "1.5", "2.0"]
+CACHE_DIR = os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or HERE, "YtubeCatcher-cache")
+# mpv cache profiles. "ahead": keep downloading the whole video while it plays (packets spill to a temp file,
+# so a long 1080p video does not sit in RAM) and keep what was already watched, so seeking back is instant.
+# "normal": a short read-ahead window - enough for smooth playback without pulling the whole video.
+CACHE_PROFILES = {
+    True: {"cache": "yes", "cache_secs": 36000, "demuxer_readahead_secs": 36000, "demuxer_max_bytes": "4GiB",
+           "demuxer_max_back_bytes": "1GiB", "demuxer_seekable_cache": "yes", "cache_pause_wait": 2},
+    False: {"cache": "yes", "cache_secs": 30, "demuxer_readahead_secs": 30, "demuxer_max_bytes": "150MiB",
+            "demuxer_max_back_bytes": "50MiB", "demuxer_seekable_cache": "auto", "cache_pause_wait": 1},
+}
 
 # libmpv-2.dll and the venv's yt-dlp.exe must be findable by mpv
 os.environ["PATH"] = os.pathsep.join([HERE, os.path.dirname(sys.executable), os.environ.get("PATH", "")])
@@ -242,6 +252,209 @@ def resolve_stream(url: str, quality: str, ck: dict) -> dict:
         desc = info.get("format_note") or info.get("format_id") or ""
     return {"video": video, "audio": audio, "headers": headers, "title": info.get("title") or url,
             "duration": info.get("duration"), "desc": desc + (f"   |   {note}" if note else "")}
+
+
+# --------------------------------------------------------------------------- suggestions (home feed, up next)
+def _walk_key(o, key):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k == key:
+                yield v
+            yield from _walk_key(v, key)
+    elif isinstance(o, list):
+        for x in o:
+            yield from _walk_key(x, key)
+
+
+def _text(t) -> str:
+    """YouTube text object ({content} / {simpleText} / {runs:[...]}) -> str."""
+    if isinstance(t, str):
+        return t
+    if not isinstance(t, dict):
+        return ""
+    if "content" in t:
+        return str(t["content"])
+    if "simpleText" in t:
+        return str(t["simpleText"])
+    return "".join(str(r.get("text", "")) for r in t.get("runs") or [] if isinstance(r, dict))
+
+
+def parse_video_cards(data) -> list[dict]:
+    """ytInitialData of a YouTube page -> [{url, id, title, channel, duration, info}] (videos only:
+    no Shorts, playlists, mixes or ads)."""
+    out, seen = [], set()
+
+    def add(vid, title, channel, duration, info):
+        if vid and title and vid not in seen and len(vid) == 11:
+            seen.add(vid)
+            out.append({"url": "https://www.youtube.com/watch?v=" + vid, "id": vid, "title": title,
+                        "channel": channel, "duration": duration if duration and duration[0].isdigit() else
+                        ("LIVE" if duration and "live" in duration.lower() else ""), "info": info})
+    for lk in _walk_key(data, "lockupViewModel"):
+        if not isinstance(lk, dict) or lk.get("contentType") != "LOCKUP_CONTENT_TYPE_VIDEO":
+            continue
+        md = (lk.get("metadata") or {}).get("lockupMetadataViewModel") or {}
+        parts = []                  # home: one row "channel · 5.2K · 1d ago"; watch page: channel row + stats row
+        for r in next(_walk_key(md, "metadataRows"), None) or []:
+            for p in (r.get("metadataParts") or []) if isinstance(r, dict) else []:
+                t = _text(p.get("text")).strip() if isinstance(p, dict) else ""
+                if t:
+                    if "view" in str(p.get("accessibilityLabel") or "") and "view" not in t:
+                        t += " views"
+                    parts.append(t)
+        badge = next((str(b["text"]) for b in _walk_key(lk.get("contentImage"), "thumbnailBadgeViewModel")
+                      if isinstance(b, dict) and b.get("text")), "")
+        add(lk.get("contentId"), _text(md.get("title")), parts[0] if parts else "", badge, " • ".join(parts[1:]))
+    for key in ("videoRenderer", "compactVideoRenderer", "gridVideoRenderer"):          # older page layouts
+        for vr in _walk_key(data, key):
+            if not isinstance(vr, dict):
+                continue
+            info = " • ".join(x for x in (_text(vr.get("shortViewCountText") or vr.get("viewCountText")),
+                                          _text(vr.get("publishedTimeText"))) if x)
+            add(vr.get("videoId"), _text(vr.get("title")),
+                _text(vr.get("longBylineText") or vr.get("ownerText") or vr.get("shortBylineText")),
+                _text(vr.get("lengthText")), info)
+    return out
+
+
+def youtube_feed(kind: str, ck: dict, video_id: str | None = None) -> list[dict]:
+    """kind 'home': the youtube.com home page (your recommendations when signed in - empty when not);
+    kind 'related': the 'Up next' column of a video's watch page."""
+    import yt_dlp
+    from yt_dlp.networking import Request
+    yc = catcher()
+    url = "https://www.youtube.com/" if kind == "home" else f"https://www.youtube.com/watch?v={video_id}"
+    opts = {"quiet": True, "no_warnings": True, **(yc.cookie_opts(**ck) if yc else {})}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        html = ydl.urlopen(Request(url, headers={"Accept-Language": "en-US,en;q=0.9"})).read().decode("utf-8", "replace")
+    i = html.find("ytInitialData = ")
+    if i < 0:
+        i = html.find('ytInitialData"] = ')
+    if i < 0:
+        raise RuntimeError("YouTube page had no video data")
+    data, _ = json.JSONDecoder().raw_decode(html, html.index("{", i))
+    items = parse_video_cards(data)
+    return [it for it in items if it["id"] != video_id]
+
+
+# --------------------------------------------------------------------------- fast-fetch stream proxy
+class StreamProxy:
+    """Local HTTP server between mpv and YouTube's CDN. One long request to googlevideo is paced at about
+    playback speed (~1x), so mpv could never get far ahead; short ranged requests are served at full line
+    speed. The proxy answers mpv's (range) requests by fetching the stream in CHUNK-sized pieces, so the
+    cache-ahead fills at download speed. mpv's own reading provides the back-pressure."""
+    CHUNK = 8 * 1024 * 1024
+
+    def __init__(self):
+        import http.server
+        self.streams: dict[str, tuple[str, dict]] = {}
+        self.sizes: dict[str, int] = {}
+        proxy = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_HEAD(self):
+                proxy.serve(self, body=False)
+
+            def do_GET(self):
+                proxy.serve(self, body=True)
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def wrap(self, url: str, headers: dict) -> str:
+        """Remote http(s) media URL -> local proxied URL (HLS/DASH manifests pass through untouched)."""
+        if not url.lower().startswith(("http://", "https://")) or any(
+                m in url.lower() for m in (".m3u8", "/manifest/", "hls_playlist")):
+            return url
+        import hashlib
+        key = hashlib.sha1(url.encode()).hexdigest()[:16]
+        if len(self.streams) > 40:                             # old links expire anyway
+            self.streams.clear()
+            self.sizes.clear()
+        self.streams[key] = (url, dict(headers or {}))
+        return f"http://127.0.0.1:{self.port}/s/{key}"
+
+    def _fetch(self, url, headers, a, b):
+        import urllib.request
+        req = urllib.request.Request(url, headers={**headers, "Range": f"bytes={a}-{b}"})
+        return urllib.request.urlopen(req, timeout=20)
+
+    def _size(self, key, url, headers) -> int | None:
+        if key not in self.sizes:
+            with self._fetch(url, headers, 0, 0) as r:
+                cr = r.headers.get("Content-Range") or ""
+                total = cr.rsplit("/", 1)[-1] if "/" in cr else r.headers.get("Content-Length")
+                self.sizes[key] = int(total) if total and total.isdigit() else None
+        return self.sizes[key]
+
+    def serve(self, h, body: bool):
+        import re
+        key = h.path.rsplit("/", 1)[-1]
+        if key not in self.streams:
+            h.send_error(404)
+            return
+        url, headers = self.streams[key]
+        try:
+            size = self._size(key, url, headers)
+        except Exception as ex:  # noqa: BLE001
+            h.send_error(502, str(ex)[:200])
+            return
+        if not size:
+            h.send_error(502, "unknown stream size")
+            return
+        m = re.match(r"bytes=(\d*)-(\d*)", h.headers.get("Range") or "")
+        a, b = 0, size - 1
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                a = int(m.group(1))
+                b = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:                                              # suffix range: last N bytes
+                a = max(0, size - int(m.group(2)))
+        if a >= size:
+            h.send_response(416)
+            h.send_header("Content-Range", f"bytes */{size}")
+            h.send_header("Content-Length", "0")
+            h.end_headers()
+            return
+        h.send_response(206 if m else 200)
+        h.send_header("Content-Type", "application/octet-stream")
+        h.send_header("Accept-Ranges", "bytes")
+        h.send_header("Content-Length", str(b - a + 1))
+        if m:
+            h.send_header("Content-Range", f"bytes {a}-{b}/{size}")
+        h.end_headers()
+        if not body:
+            return
+        pos = a
+        try:
+            while pos <= b:
+                end = min(b, pos + self.CHUNK - 1)
+                for attempt in range(3):
+                    try:
+                        with self._fetch(url, headers, pos, end) as r:
+                            while True:
+                                data = r.read(256 * 1024)
+                                if not data:
+                                    break
+                                h.wfile.write(data)
+                                pos += len(data)
+                        break
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        raise
+                    except Exception:  # noqa: BLE001  (upstream hiccup: resume where it stopped)
+                        if attempt == 2:
+                            raise
+                if pos <= end:                                 # upstream ended early
+                    return
+        except Exception:  # noqa: BLE001  (mpv seeked away / closed the file)
+            h.close_connection = True
 
 
 # --------------------------------------------------------------------------- GUI
@@ -549,6 +762,13 @@ def draw_icon(cv, name: str, cx: float, cy: float, size: float, color: str):
     elif name == "check":
         cv.create_line(P(4.5, 12.5, 9.5, 17.5, 19.5, 6.5), fill=color, width=w * 1.3, capstyle="round",
                        joinstyle="round")
+    elif name == "home":
+        cv.create_line(P(3, 11.5, 12, 3.5, 21, 11.5), fill=color, width=w, capstyle="round", joinstyle="round")
+        cv.create_line(P(5.5, 9.5, 5.5, 20.5, 10, 20.5, 10, 14.5, 14, 14.5, 14, 20.5, 18.5, 20.5, 18.5, 9.5),
+                       fill=color, width=w, joinstyle="round")
+    elif name == "refresh":
+        cv.create_arc(P(4, 4, 20, 20), start=70, extent=290, style="arc", outline=color, width=w)
+        cv.create_polygon(P(11.5, 1.5, 17.5, 4.5, 12, 8.5), fill=color, outline=color, joinstyle="round")
     elif name == "scissors":
         cv.create_oval(P(3, 14, 9, 20), outline=color, width=w)
         cv.create_oval(P(15, 14, 21, 20), outline=color, width=w)
@@ -680,12 +900,17 @@ def pill_button(parent, text: str, command, icon: str | None = None, bg: str = S
 def fetch_thumb_png(video_id: str, w: int, h: int) -> bytes | None:
     """YouTube thumbnail -> PNG bytes at w x h (Pillow if present, else the bundled ffmpeg)."""
     import urllib.request
-    try:
-        req = urllib.request.Request(f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg",
-                                     headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            jpg = r.read()
-    except Exception:
+    jpg = None
+    for name in (("hq720.jpg", "mqdefault.jpg") if w > 320 else ("mqdefault.jpg",)):   # hq720: 1280x720, not on all
+        try:
+            req = urllib.request.Request(f"https://i.ytimg.com/vi/{video_id}/{name}",
+                                         headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                jpg = r.read()
+            break
+        except Exception:
+            continue
+    if not jpg:
         return None
     try:
         import io
@@ -779,6 +1004,37 @@ def fmt_views(n) -> str:
     return f"{n} views" if n else ""
 
 
+def clamp_lines(text: str, font, width: int, n: int = 2) -> str:
+    """Wrap text to width pixels (word-wise; CJK per character) and keep at most n lines, ending in '…'."""
+    import re
+    lines, cur = [], ""
+    for tok in re.findall(r"[　-鿿가-힯＀-￯]|[^\s　-鿿가-힯＀-￯]+\s*|\s+",
+                          text or ""):
+        if font.measure(cur + tok) <= width:
+            cur += tok
+            continue
+        if cur.strip():
+            lines.append(cur.rstrip())
+        cur = ""
+        while font.measure(tok.rstrip()) > width and len(tok) > 1:       # a token wider than the line
+            k = len(tok)
+            while k > 1 and font.measure(tok[:k]) > width:
+                k -= 1
+            lines.append(tok[:k])
+            tok = tok[k:]
+        cur = tok.lstrip()
+        if len(lines) > n:
+            break
+    if cur.strip():
+        lines.append(cur.rstrip())
+    if len(lines) > n:
+        last = lines[n - 1]
+        while last and font.measure(last + "…") > width:
+            last = last[:-1]
+        lines = lines[:n - 1] + [last.rstrip() + "…"]
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------- GUI
 def run_gui(initial_url: str | None = None):
     import base64
@@ -815,9 +1071,16 @@ def run_gui(initial_url: str | None = None):
     top = tk.Frame(root, bg=BG, height=px(60))
     top.pack(fill="x")
     top.pack_propagate(False)
+    home_btn = icon_button(top, "home", lambda: show_home(), size=40, bg=BG, hover=SURF2,
+                           tip="Home: recommended videos")
+    home_btn.pack(side="left", padx=(px(12), 0))
     logo = icon_label(top, "logo", px(38), RED, BG)
-    logo.pack(side="left", padx=(px(18), px(4)))
-    tk.Label(top, text=APP_NAME, bg=BG, fg=TXT, font=F(15, True)).pack(side="left")
+    logo.pack(side="left", padx=(px(6), px(4)))
+    app_lbl = tk.Label(top, text=APP_NAME, bg=BG, fg=TXT, font=F(15, True))
+    app_lbl.pack(side="left")
+    for w_ in (logo, app_lbl):                                  # like youtube.com: the logo goes home
+        w_.configure(cursor="hand2")
+        w_.bind("<Button-1>", lambda e: show_home())
 
     right_top = tk.Frame(top, bg=BG)
     right_top.pack(side="right", padx=px(16))
@@ -893,6 +1156,10 @@ def run_gui(initial_url: str | None = None):
     speed_chip = pill_button(bar, "1x", lambda e: pop_menu(e, "speed"), bg="#1f1f1f", hover="#333333",
                              parent_bg="black", height=30, tip="Playback speed", font_size=9)
     speed_chip.pack(side="right", padx=px(4))
+    cache_chip = pill_button(bar, "Cache", lambda e: toggle_cache(), bg="#1f1f1f", hover="#333333",
+                             parent_bg="black", height=30, font_size=9,
+                             tip="Cache ahead: keep streaming the video ahead of playback (click to toggle)")
+    cache_chip.pack(side="right", padx=px(4))
     loop_btn = icon_button(bar, "loop", lambda: loop_toggle(), tip="Loop selected clip (L)", **CB)
     loop_btn.pack(side="right")
 
@@ -989,14 +1256,33 @@ def run_gui(initial_url: str | None = None):
                           wraplength=px(900))
     status_lbl.pack(fill="x", pady=(px(8), 0))
 
+    # ---------------- home: a youtube.com-style grid of recommended videos (in place of the player)
+    home = tk.Frame(col, bg=BG)
+    hh = tk.Frame(home, bg=BG)
+    hh.pack(fill="x", pady=(px(2), px(12)))
+    tk.Label(hh, text="Home", bg=BG, fg=TXT, font=F(16, True)).pack(side="left")
+    home_sub = tk.StringVar(value="")
+    home_sub_lbl = tk.Label(hh, textvariable=home_sub, bg=BG, fg=SUB, font=F(9), anchor="w")
+    home_sub_lbl.pack(side="left", fill="x", expand=True, padx=(px(16), px(8)))
+    home_sub.trace_add("write", lambda *_: home_sub_lbl.configure(font=F(9, False, home_sub.get())))
+    back_chip = pill_button(hh, "Back to video", lambda e: hide_home(), icon="play", parent_bg=BG, height=32,
+                            font_size=9, tip="Return to the video you were watching")
+    pill_button(hh, "Refresh", lambda e: load_home(force=True), icon="refresh", parent_bg=BG, height=32,
+                font_size=9, bold=False, tip="Get new recommendations").pack(side="right", padx=(px(8), 0))
+    hc = tk.Canvas(home, bg=BG, highlightthickness=0)
+    hc.pack(fill="both", expand=True)
+    hin = tk.Frame(hc, bg=BG)
+    hin_win = hc.create_window(0, 0, window=hin, anchor="nw")
+    hin.bind("<Configure>", lambda e: hc.configure(scrollregion=hc.bbox("all")))
+
     # ---------------- results sidebar
     side_head = tk.Frame(side, bg=BG)
     side_head.pack(fill="x")
     res_title = tk.StringVar(value="Search results")       # label of the Results tab
     tabs = {}
-    for key_, var_or_text in (("results", res_title), ("recent", "Recent")):
+    for key_, var_or_text in (("results", res_title), ("upnext", "Up next"), ("recent", "Recent")):
         tf = tk.Frame(side_head, bg=BG, cursor="hand2")
-        tf.pack(side="left", padx=(0, px(18)))
+        tf.pack(side="left", padx=(0, px(16)))
         kw_ = {"textvariable": var_or_text} if isinstance(var_or_text, tk.StringVar) else {"text": var_or_text}
         tl = tk.Label(tf, bg=BG, fg=TXT, font=F(12, True), anchor="w", cursor="hand2", **kw_)
         tl.pack(anchor="w")
@@ -1022,8 +1308,11 @@ def run_gui(initial_url: str | None = None):
     lst.bind("<Configure>", lambda e: lst.itemconfigure(lst_win, width=e.width))
 
     def wheel(e):
-        if e.widget.winfo_toplevel() is root and str(e.widget).startswith(str(lst)):
-            lst.yview_scroll(int(-e.delta / 120) if e.delta else (-3 if e.num == 4 else 3), "units")
+        if e.widget.winfo_toplevel() is not root:
+            return
+        for cv_ in (lst, hc):
+            if str(e.widget) == str(cv_) or str(e.widget).startswith(str(cv_) + "."):
+                cv_.yview_scroll(int(-e.delta / 120) if e.delta else (-3 if e.num == 4 else 3), "units")
     root.bind_all("<MouseWheel>", wheel, add="+")
     root.bind_all("<Button-4>", wheel, add="+")
     root.bind_all("<Button-5>", wheel, add="+")
@@ -1042,6 +1331,9 @@ def run_gui(initial_url: str | None = None):
     load_gen = [0]
     mpvmod, mpv_err = import_mpv()
     player = None
+    cache_on = [bool(st.get("cache_ahead", True))]
+    proxy: list[StreamProxy | None] = [None]
+    buffered: list[tuple[float, float]] = []      # seekable (already downloaded) ranges, for the seek bar
 
     pending_in: dict[str, float | None] = {}      # an IN mark without its OUT yet, per video
 
@@ -1175,9 +1467,61 @@ def run_gui(initial_url: str | None = None):
         root.update_idletasks()
         player = mpvmod.MPV(wid=str(video.winfo_id()), ytdl=False, osc=False, keep_open="yes",
                             input_default_bindings=False, input_vo_keyboard=False, cursor_autohide=1000,
-                            hwdec="auto-safe", cache="yes", demuxer_max_bytes="300MiB",
-                            volume=vol_val[0], log_handler=mpv_log, loglevel="warn")
+                            hwdec="auto-safe", volume=vol_val[0], log_handler=mpv_log, loglevel="warn")
         player.register_event_callback(mpv_event)
+        try:                                    # big read-ahead goes to a temp file (deleted by mpv on close)
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            for opt in ("demuxer-cache-dir", "cache-dir"):          # renamed in newer mpv
+                try:
+                    player[opt] = CACHE_DIR
+                    break
+                except Exception:
+                    pass
+            player["cache-on-disk"] = "yes"
+        except Exception:
+            pass
+        apply_cache()
+
+    def apply_cache():
+        """Push the current cache profile to mpv; the demuxer picks the new limits up while playing."""
+        for k_, v_ in CACHE_PROFILES[cache_on[0]].items():
+            setp(k_, v_)
+        cache_chip.colors = ("#263850", "#30486a", "#cfe3ff") if cache_on[0] else ("#1f1f1f", "#333333", SUB)
+        update_cache_chip(None, force=True)
+
+    def update_cache_chip(ahead, force=False):
+        if not cache_on[0]:
+            txt = "Cache off"
+        elif ahead is None:
+            txt = "Cache ahead"
+        elif state["dur"] and (state["pos"] or 0) + ahead >= state["dur"] - 0.5:
+            txt = "Cached all"
+        else:
+            txt = "Cached +" + fmt_time(int(ahead))
+        if txt != cache_chip.text or force:
+            cache_chip.text = txt
+            cache_chip.redraw()
+
+    def toggle_cache():
+        cache_on[0] = not cache_on[0]
+        apply_cache()
+        status_var.set("Cache ahead ON: the video keeps downloading ahead of playback" if cache_on[0]
+                       else "Cache ahead OFF: only a short window is buffered")
+        persist()
+
+    def cache_ranges():
+        """-> (seconds buffered ahead of the play head or None, [(start, end), ...] seekable ranges)."""
+        cs = getp("demuxer_cache_state")
+        if not isinstance(cs, dict):
+            return None, []
+        rng = []
+        for r_ in cs.get("seekable-ranges") or []:
+            try:
+                rng.append((float(r_["start"]), float(r_["end"])))
+            except Exception:
+                pass
+        ahead = cs.get("cache-duration")
+        return (float(ahead) if isinstance(ahead, (int, float)) else None), rng
 
     def mpv_log(level, component, text):
         if level in ("error", "fatal"):
@@ -1235,6 +1579,7 @@ def run_gui(initial_url: str | None = None):
             pending_in[video_key(state["url"])] = state["in"]
         state.update({"url": url, "title": "", "in": pending_in.get(video_key(url)), "dur": None, "pos": None,
                       "loop": None, "sel": None, "ready": False, "meta": meta_info or {}, "dur_saved": False})
+        buffered.clear()
         try:
             player.pause = True             # old video frozen; I/O are refused until the new one has loaded
             player["ab-loop-a"] = "no"
@@ -1244,13 +1589,17 @@ def run_gui(initial_url: str | None = None):
         title_var.set("Loading...")
         in_var.set("IN " + fmt_time(state["in"]) if state["in"] is not None else "")
         if meta_info:
-            sub_var.set("  •  ".join(x for x in (meta_info.get("channel"), fmt_views(meta_info.get("views"))) if x))
+            sub_var.set("  •  ".join(x for x in (meta_info.get("channel"),
+                                                 fmt_views(meta_info.get("views")) or meta_info.get("info")) if x))
         else:
             sub_var.set("")
         refresh_clips()
         load_gen[0] += 1
         gen = load_gen[0]
+        if state.get("home"):
+            hide_home()
         highlight_result()
+        load_upnext(url)
         if not url.lower().startswith(("http://", "https://")):          # local file
             load_stream(gen, url, {"video": url, "audio": None, "headers": {}, "title": os.path.basename(url),
                                    "desc": "local file"}, start)
@@ -1275,6 +1624,17 @@ def run_gui(initial_url: str | None = None):
             player["ab-loop-a"] = "no"
             player["ab-loop-b"] = "no"
             player["start"] = f"{start:.2f}" if start else "none"
+            if cache_on[0] and url.lower().startswith(("http://", "https://")):
+                r = dict(r)                     # fetch through the fast chunked proxy (see StreamProxy)
+                try:
+                    if proxy[0] is None:
+                        proxy[0] = StreamProxy()
+                    hdrs = r.get("headers") or {}
+                    r["video"] = proxy[0].wrap(r["video"], hdrs)
+                    if r.get("audio"):
+                        r["audio"] = proxy[0].wrap(r["audio"], hdrs)
+                except Exception as ex_:  # noqa: BLE001
+                    status_var.set(f"cache proxy unavailable ({ex_}) - streaming directly")
             player.audio_files = [r["audio"]] if r.get("audio") else []
             player.http_header_fields = [f"{k}: {v}" for k, v in (r.get("headers") or {}).items()
                                          if k.lower() in ("user-agent", "referer", "origin", "accept-language")]
@@ -1314,6 +1674,8 @@ def run_gui(initial_url: str | None = None):
                 pass
 
     def toggle_fullscreen():
+        if state.get("home") and not state["fs"]:
+            return
         state["fs"] = not state["fs"]
         if state["fs"]:
             for w in (top, meta, card, status_lbl):
@@ -1822,6 +2184,9 @@ def run_gui(initial_url: str | None = None):
         d = state["dur"]
         if not d:
             return
+        for a, b in buffered:                                    # already downloaded: lighter grey
+            if b > a:
+                seek.create_rectangle(x_of(max(0.0, a), w), y0, x_of(min(d, b), w), y1, fill="#8a8a8a", width=0)
         for i, (a, b) in enumerate(clips()):
             col_ = "#7dffb0" if state["sel"] == i else CLIP
             seek.create_rectangle(x_of(a, w), cy - px(6), max(x_of(b, w), x_of(a, w) + 2), cy + px(6),
@@ -2026,6 +2391,9 @@ def run_gui(initial_url: str | None = None):
                 search_status.set(err if err else f"{len(items)} videos for '{text}' - click one to play"
                                   + ("   (signed out: browser cookies unreadable - use Sign in at the top right)"
                                      if note else ""))
+        elif view["tab"] == "upnext":
+            items = list(upnext["items"])
+            search_status.set(upnext["status"])
         else:
             items = list(recent)
             search_status.set(f"{len(items)} recently played - click one to play it again" if items
@@ -2109,7 +2477,7 @@ def run_gui(initial_url: str | None = None):
             bits = [f"{n_clips} clip{'s' if n_clips != 1 else ''}" if n_clips else "", fmt_ago(r.get("t"))]
             info = "  •  ".join(b_ for b_ in bits if b_)
         else:
-            info = fmt_views(r.get("views"))
+            info = fmt_views(r.get("views")) or r.get("info") or ""
         v = tk.Label(txt, text=info, bg=BG, fg=CLIP if recent_row and "clip" in info else SUB, font=F(9), anchor="w")
         v.pack(fill="x")
         widgets = (row, th, txt, t, c, v)
@@ -2170,6 +2538,211 @@ def run_gui(initial_url: str | None = None):
                 th.create_image(0, 0, image=img, anchor="nw", tags="thumbimg")
                 th.tag_raise("badge")
                 return
+
+    # =========================================================== suggestions: Up next + Home
+    upnext = {"items": [], "status": "Videos like the one you're watching show up here.", "for": None, "gen": 0}
+
+    def load_upnext(url):
+        """Fill the Up next tab with the watch page's related videos (YouTube videos only)."""
+        key = video_key(url)
+        if not key.startswith("yt:") or key == upnext["for"]:
+            return
+        upnext.update(items=[], status="Finding videos like this one...", **{"for": key})
+        upnext["gen"] += 1
+        gen, ck = upnext["gen"], cookie_settings()
+        if view["tab"] == "upnext":
+            render_list()
+
+        def work():
+            try:
+                items, err = youtube_feed("related", ck, key[3:]), None
+            except Exception as ex:  # noqa: BLE001
+                items, err = [], str(ex).replace("ERROR: ", "")[-200:]
+
+            def done():
+                if gen != upnext["gen"]:
+                    return
+                upnext["items"] = items
+                upnext["status"] = (f"Could not get suggestions: {err}" if err else
+                                    f"{len(items)} videos like this one - click one to play" if items
+                                    else "YouTube had no suggestions for this video.")
+                if view["tab"] == "upnext":
+                    render_list()
+            q.put(("call", done))
+        threading.Thread(target=work, daemon=True).start()
+
+    GW, GGAP = px(300), px(16)
+    GH = GW * 9 // 16
+    hv = {"items": [], "cards": [], "cols": 0, "gen": 0, "loaded": False, "imgs": {}}
+    home_png: dict[str, bytes] = {}
+
+    def show_home():
+        if state["fs"]:
+            return
+        if not state.get("home"):
+            state["home"] = True
+            for w in (pbox, meta, card):
+                w.pack_forget()
+            home.pack(fill="both", expand=True, before=status_lbl)
+            if state["url"] and not getp("pause"):
+                setp("pause", True)
+                state["home_paused"] = True
+        if state["url"]:
+            back_chip.pack(side="right", padx=(px(8), 0))
+        else:
+            back_chip.pack_forget()
+        root.title(APP_NAME)
+        load_home()
+
+    def hide_home():
+        if not state.get("home"):
+            return
+        state["home"] = False
+        home.pack_forget()
+        pbox.pack(fill="both", expand=True, before=status_lbl)
+        meta.pack(fill="x", pady=(px(12), 0), before=status_lbl)
+        card.pack(fill="x", pady=(px(12), 0), before=status_lbl)
+        if state["title"]:
+            root.title(f"{state['title']} - {APP_NAME}")
+        if state.pop("home_paused", False):
+            setp("pause", False)
+
+    def load_home(force=False):
+        if hv["loaded"] and not force:
+            return
+        hv["loaded"] = True
+        hv["gen"] += 1
+        gen, ck = hv["gen"], cookie_settings()
+        home_sub.set("Loading your recommendations...")
+        last = next((r_ for r_ in recent if video_key(r_["url"]).startswith("yt:")), None)
+
+        def work():
+            note, err, items = "", None, []
+            try:
+                items = youtube_feed("home", ck)
+                if len(items) < 4 and last:           # signed out: YouTube's home page is empty
+                    items = youtube_feed("related", ck, video_key(last["url"])[3:])
+                    note = f"Videos like “{last.get('title') or 'your last video'}”"
+                elif len(items) >= 4:
+                    note = "Recommended for you" if any(ck.values()) else "Recommended"
+            except Exception as ex:  # noqa: BLE001
+                err = str(ex).replace("ERROR: ", "")[-200:]
+
+            def done():
+                if gen != hv["gen"]:
+                    return
+                if err:
+                    hv["loaded"] = False                  # try again next time
+                    home_sub.set("Could not load recommendations: " + err)
+                elif not items:
+                    home_sub.set("Sign in (top right) to see your YouTube recommendations - or search above.")
+                else:
+                    home_sub.set(note + ("   ·   sign in (top right) for your own recommendations"
+                                         if not any(ck.values()) else ""))
+                render_home(items)
+            q.put(("call", done))
+        threading.Thread(target=work, daemon=True).start()
+
+    def render_home(items):
+        for w in hin.winfo_children():
+            w.destroy()
+        hv["items"], hv["cards"], hv["cols"], hv["imgs"] = list(items), [], 0, {}
+        hc.yview_moveto(0)
+        for r in items:
+            hv["cards"].append(build_card(r))
+        layout_home()
+        gen = hv["gen"]
+        threading.Thread(target=load_home_thumbs, args=(gen, list(enumerate(items))), daemon=True).start()
+
+    def build_card(r):
+        cd = tk.Frame(hin, bg=BG, cursor="hand2")
+        th = tk.Canvas(cd, width=GW, height=GH, bg=BG, highlightthickness=0)
+        th.pack(anchor="w")
+        ph = aa_image(("thumbph", GW, GH), GW, GH, lambda k: _rrect(k, 0, 0, GW, GH, px(12), fill="#262626"))
+        if ph:
+            th.create_image(0, 0, image=ph, anchor="nw")
+        else:
+            th.create_rectangle(0, 0, GW, GH, fill="#262626", width=0)
+        if r.get("duration"):
+            f = F(9, True)
+            tw, bh, m = f.measure(r["duration"]) + px(10), px(19), px(7)
+            bcol = "#cc0000" if r["duration"] == "LIVE" else "#000000"
+            badge = aa_image(("badge", tw, bh, bcol), tw, bh, lambda k: _rrect(k, 0, 0, tw, bh, px(4), fill=bcol))
+            if badge:
+                th.create_image(GW - m - tw, GH - m - bh, image=badge, anchor="nw", tags="badge")
+            else:
+                th.create_rectangle(GW - m - tw, GH - m - bh, GW - m, GH - m, fill=bcol, width=0, tags="badge")
+            th.create_text(GW - m - tw / 2, GH - m - bh / 2, text=r["duration"], fill="white", font=f, tags="badge")
+        tf_ = F(11, True, r["title"])
+        t = tk.Label(cd, text=clamp_lines(r["title"], tf_, GW - px(8)), bg=BG, fg=TXT, font=tf_,
+                     anchor="nw", justify="left")
+        t.pack(fill="x", pady=(px(10), 0))
+        ch_ = r.get("channel") or ""
+        c = tk.Label(cd, text=ch_, bg=BG, fg=SUB, font=F(10, False, ch_), anchor="w")
+        c.pack(fill="x", pady=(px(4), 0))
+        v = tk.Label(cd, text=r.get("info") or "", bg=BG, fg=SUB, font=F(10), anchor="w")
+        v.pack(fill="x")
+        ws = (cd, th, t, c, v)
+
+        def paint(bg):
+            for w in ws:
+                w.configure(bg=bg)
+        for w in ws:
+            w.bind("<Enter>", lambda e: paint(SURF))
+            w.bind("<Leave>", lambda e: paint(BG))
+            w.bind("<Button-1>", lambda e, r=r: open_suggested(r))
+        Tooltip(t, r["title"])
+        cd.thumb = th
+        return cd
+
+    def layout_home(width=None):
+        width = width or hc.winfo_width()
+        cols = max(1, (width + GGAP) // (GW + GGAP))
+        if cols == hv["cols"] and hv["cards"] and hv["cards"][0].winfo_manager():
+            return
+        hv["cols"] = cols
+        for i, cd in enumerate(hv["cards"]):
+            cd.grid(row=i // cols, column=i % cols, sticky="nw", padx=(0, GGAP if i % cols < cols - 1 else 0),
+                    pady=(0, px(22)))
+
+    def hc_configure(e):
+        used = min(e.width, max(1, (e.width + GGAP) // (GW + GGAP)) * (GW + GGAP) - GGAP)
+        hc.coords(hin_win, max(0, (e.width - used) // 2), 0)       # centre the grid
+        layout_home(e.width)
+    hc.bind("<Configure>", hc_configure)
+
+    def open_suggested(r):
+        view["tab"] = "upnext"                       # like YouTube: the watch page lists what's next
+        state.pop("home_paused", None)
+        play(r["url"], meta_info=r)
+        render_list()
+
+    def load_home_thumbs(gen, items):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(it):
+            i, r = it
+            if gen != hv["gen"]:
+                return
+            png = home_png.get(r["id"]) or fetch_thumb_png(r["id"], GW, GH)
+            if png:
+                home_png[r["id"]] = png
+                q.put(("call", lambda: put_home_thumb(gen, i, png)))
+        with ThreadPoolExecutor(6) as ex_:
+            list(ex_.map(one, items))
+
+    def put_home_thumb(gen, i, png):
+        if gen != hv["gen"] or i >= len(hv["cards"]):
+            return
+        th = hv["cards"][i].thumb
+        try:
+            img = tk.PhotoImage(data=base64.b64encode(png).decode("ascii"))
+        except tk.TclError:
+            return
+        hv["imgs"][i] = img
+        th.delete("thumbimg")
+        th.create_image(0, 0, image=img, anchor="nw", tags="thumbimg")
+        th.tag_raise("badge")
 
     q_entry.bind("<Return>", go_search)
 
@@ -2233,6 +2806,7 @@ def run_gui(initial_url: str | None = None):
         save_json(VIEWER_SETTINGS, {"geometry": root.geometry() if not state["fs"] else st.get("geometry"),
                                     "geometry_scale": UI["scale"],
                                     "query": query_var.get(), "quality": qual_var.get(),
+                                    "cache_ahead": cache_on[0],
                                     "volume": vol_val[0], "clips": keep, "extract": ex, "recent": recent, "searches": searches,
                                     "last_dir": st.get("last_dir"),
                                     **({"account": st["account"]} if st.get("account") else {})})
@@ -2286,6 +2860,9 @@ def run_gui(initial_url: str | None = None):
                 state["dur_saved"] = True
                 recent_set_duration(state["dur"])
             buf = "   buffering..." if getp("paused_for_cache") else ""
+            if tick_n[0] % 2 == 0:
+                ahead, buffered[:] = cache_ranges()
+                update_cache_chip(ahead if state.get("ready") else None)
             if state.get("frames"):
                 fr = getp("estimated_frame_number")
                 time_var.set(f"{fmt_precise(state['pos'] or 0)} / {fmt_time(state['dur'] or 0).split('.')[0]}"
@@ -2327,6 +2904,7 @@ def run_gui(initial_url: str | None = None):
             mpv_err = f"mpv failed to start: {err_}"
             player = None
     if not player:
+        apply_cache()                           # chip look only
         show_msg(mpv_err + "\n\nClick 'Install player' (downloads libmpv, ~30 MB), then restart the viewer.")
 
         def do_install(_e=None):
@@ -2359,6 +2937,8 @@ def run_gui(initial_url: str | None = None):
     refresh_clips()
     draw_vol()
     tick()
+    if not initial_url:
+        show_home()
     if initial_url:
         root.after(300, lambda: play(initial_url))
     elif query_var.get().strip() and not looks_like_url(query_var.get()):
