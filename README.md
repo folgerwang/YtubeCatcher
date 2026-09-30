@@ -88,7 +88,17 @@ You need to sign in only for age-restricted or members-only videos, or when YouT
 
 A dark, YouTube-style interface. It's DPI-aware, so text stays sharp on 125–200 % displays. Icons, buttons and knobs are drawn anti-aliased. Titles in Chinese, Japanese and Korean use Microsoft YaHei UI.
 
-## Quick start (Windows)
+## Install (Windows)
+
+Download **`YtubeCatcher-Setup-<version>.exe`** from the [Releases](https://github.com/folgerwang/YtubeCatcher/releases) page and run it. You don't need Python or admin rights. The installer puts the app in `%LOCALAPPDATA%\Programs\YtubeCatcher`, with its own Python, yt-dlp, ffmpeg and the mpv player, and adds a Start menu shortcut (and a desktop shortcut if you want one).
+
+- yt-dlp updates itself in the background, at most once a day; the new version is used from the next start.
+- *Voice only* works the same way as below: click *Voice only ↓* in the app to install the BGM filter.
+- To remove it, use *Settings > Apps > Installed apps > YtubeCatcher*. This also deletes its settings, sign-in and downloaded voice models. Your saved clips in `Music\YtubeCatcher` are kept.
+
+To build the installer yourself, double-click **`make_package.bat`** (or run `make_package.bat 1.2.0` to set the version; the default is today's date). The first time, it sets up what the build needs: the Python environment, `libmpv-2.dll` and [Inno Setup 6](https://jrsoftware.org/isinfo.php) (through winget). The installer is written to `dist\`.
+
+## Run from source (Windows)
 
 1. Install **Python 3.10+** (tick *Add python.exe to PATH*).
 2. Double-click **`run.bat`**. The first run sets everything up next to the app: a Python virtual environment, yt-dlp, ffmpeg, the mpv player library (`libmpv-2.dll`), Pillow, and **Deno** (the JavaScript runtime yt-dlp needs for YouTube).
@@ -156,6 +166,8 @@ run.bat URL --cookies youtube_cookies.txt                      (download signed 
 ytubeviewer.py      the app (player, clips, extract, sign-in)
 ytubecatcher.py     the engine: download, cut, BGM filter, combine; also the classic window and the CLI
 run.bat             setup + launcher        install_vocals.bat   optional BGM filter (PyTorch, BS-RoFormer, Demucs)
+make_package.bat    builds the Windows installer into dist\ (uses installer/)
+installer/          build_installer.ps1, YtubeCatcher.iss (Inno Setup), app icon
 docs/               README screenshots and diagram
 ```
 

@@ -22,6 +22,10 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "YtubeCatcher"
 VIEWER_SETTINGS = os.path.join(HERE, "viewer_settings.json")
+APP_USER_MODEL_ID = "folgerwang.YtubeCatcher"
+# installed by the Windows installer: a private Python in <app>\runtime (see installer\build_installer.ps1)
+RUNTIME_PY = os.path.join(HERE, "runtime", "python.exe")
+INSTALLED = os.path.isfile(RUNTIME_PY)
 QUALITIES = ["360", "480", "720", "1080", "1440", "2160", "audio only"]
 SPEEDS = ["0.5", "0.75", "1.0", "1.25", "1.5", "2.0"]
 CACHE_DIR = os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or HERE, "YtubeCatcher-cache")
@@ -168,6 +172,41 @@ def install_libmpv(log=print) -> str:
     finally:
         shutil.rmtree(td, ignore_errors=True)
     return "libmpv-2.dll installed"
+
+
+def update_ytdlp(log) -> None:
+    """Installed app only (run.bat does this for the .venv): keep yt-dlp current - YouTube changes often.
+    At most once a day, in the background; the new version is used from the next start."""
+    if not INSTALLED:
+        return
+    stamp = os.path.join(HERE, ".ytdlp_checked")
+    try:
+        if time.time() - os.path.getmtime(stamp) < 20 * 3600:
+            return
+    except OSError:
+        pass
+
+    def ver():
+        r = subprocess.run([RUNTIME_PY, "-c", "import yt_dlp; print(yt_dlp.version.__version__)"],
+                           capture_output=True, text=True, timeout=60, **_no_window())
+        return r.stdout.strip()
+
+    def work():
+        try:
+            old = ver()
+            r = subprocess.run([RUNTIME_PY, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                                "--no-warn-script-location", "--upgrade", "yt-dlp[default]"],
+                               capture_output=True, text=True, timeout=600, **_no_window())
+            if r.returncode != 0:
+                return                                  # offline etc. - try again next start
+            with open(stamp, "w") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M"))
+            new = ver()
+            if new and new != old:
+                log(f"yt-dlp updated to {new} - restart YtubeCatcher to use it")
+        except Exception:
+            pass
+    threading.Thread(target=work, daemon=True).start()
 
 
 def import_mpv():
@@ -1043,9 +1082,22 @@ def run_gui(initial_url: str | None = None):
 
     st = load_json(VIEWER_SETTINGS, {})
     enable_dpi_awareness()
+    if os.name == "nt":                     # own taskbar button + icon (not python's); matches the installer shortcut
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+        except Exception:
+            pass
     root = tk.Tk()
     init_ui(root)
     root.title(APP_NAME)
+    for ico in (os.path.join(HERE, "ytubecatcher.ico"), os.path.join(HERE, "installer", "ytubecatcher.ico")):
+        if os.path.isfile(ico):
+            try:
+                root.iconbitmap(default=ico)
+            except Exception:
+                pass
+            break
     def initial_geometry() -> str:
         """Saved size, converted to this display's scale and clamped to the screen."""
         import re
@@ -2937,6 +2989,7 @@ def run_gui(initial_url: str | None = None):
     refresh_clips()
     draw_vol()
     tick()
+    root.after(5000, lambda: update_ytdlp(lambda m: q.put(("status", m))))
     if not initial_url:
         show_home()
     if initial_url:

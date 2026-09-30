@@ -13,3 +13,6 @@ viewer_settings.json.tmp
 libmpv-2.dll
 7zr.exe
 deno.exe
+build/
+dist/
+.ytdlp_checked

@@ -336,11 +336,11 @@ def _get_engine(quality: str, log):
     want = "best" if quality == "best" else "fast"
     if want == "best" and not roformer_available():
         raise RuntimeError("Quality 'best' needs the BS-RoFormer engine (audio-separator), which is not "
-                           "installed in this Python. Run install_vocals.bat and start the app with run.bat, "
+                           "installed in this Python. Run install_vocals.bat and restart the app, "
                            "or choose quality 'fast' (Demucs - leaves more music).")
     if want == "fast" and not demucs_available():
         raise RuntimeError("Quality 'fast' needs Demucs, which is not installed in this Python. "
-                           "Run install_vocals.bat and start the app with run.bat.")
+                           "Run install_vocals.bat and restart the app.")
     if want not in _ENGINE_CACHE:
         log(f"   loading {QUALITY_MODELS[want]} model (first run downloads it)...")
         _ENGINE_CACHE[want] = _RoformerEngine(log) if want == "best" else _DemucsEngine(log)
@@ -1780,9 +1780,9 @@ def run_gui():
             if os.name == "nt" and os.path.exists(bat):
                 os.startfile(bat)
                 messagebox.showinfo(APP_NAME, "The installer opened in a console window (~3.5 GB download).\n"
-                                    "When it says Done, close and restart YtubeCatcher with run.bat.")
+                                    "When it says Done, close and restart YtubeCatcher.")
             else:
-                messagebox.showinfo(APP_NAME, "Run install_vocals.bat in the app folder, then restart with run.bat.")
+                messagebox.showinfo(APP_NAME, "Run install_vocals.bat in the app folder, then restart YtubeCatcher.")
         ttk.Button(bgm, text="Install BGM filter...", command=run_installer).pack(side="left", padx=8)
     sync_bgm()
 
