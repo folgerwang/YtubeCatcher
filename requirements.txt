@@ -1,2 +1,4 @@
 yt-dlp[default]
 imageio-ffmpeg
+mpv
+pillow

@@ -5,3 +5,11 @@ __pycache__/
 settings.json
 settings.json.tmp
 .ytubecatcher_tmp/
+.yt_signin_profile/
+youtube_cookies.txt
+youtube_cookies.txt.tmp
+viewer_settings.json
+viewer_settings.json.tmp
+libmpv-2.dll
+7zr.exe
+deno.exe

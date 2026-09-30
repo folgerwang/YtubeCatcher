@@ -42,6 +42,48 @@ DEMUCS_MODEL = "htdemucs"
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 # GUI inputs are auto-saved here (next to the app, so they survive ytubecatcher.py updates)
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+# a deno.exe next to the app is found by yt-dlp (YouTube's JS challenges need a JS runtime)
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if _APP_DIR not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = _APP_DIR + os.pathsep + os.environ.get("PATH", "")
+
+
+def js_runtime_available() -> bool:
+    """yt-dlp solves YouTube's JavaScript challenges with Deno (without it, signed-in / web-client
+    requests often come back with no formats: 'Requested format is not available')."""
+    return bool(shutil.which("deno"))
+
+
+def install_deno(log=print) -> str:
+    """Download the official Deno build (~40 MB) and put deno(.exe) next to this file."""
+    import io
+    import platform
+    import urllib.request
+    import zipfile
+    arch = "aarch64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
+    target = {"nt": f"{arch}-pc-windows-msvc"}.get(os.name) or \
+        (f"{arch}-apple-darwin" if sys.platform == "darwin" else f"{arch}-unknown-linux-gnu")
+    url = f"https://github.com/denoland/deno/releases/latest/download/deno-{target}.zip"
+    log("downloading Deno (JavaScript runtime for yt-dlp, ~40 MB)...")
+    req = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
+    with urllib.request.urlopen(req, timeout=180) as r:
+        data = r.read()
+    name = "deno.exe" if os.name == "nt" else "deno"
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        member = next(n for n in z.namelist() if os.path.basename(n).lower() == name)
+        dst = os.path.join(_APP_DIR, name)
+        with z.open(member) as src, open(dst + ".part", "wb") as out:
+            shutil.copyfileobj(src, out)
+    os.replace(dst + ".part", dst)
+    if os.name != "nt":
+        os.chmod(dst, 0o755)
+    return "Deno installed - YouTube's JS challenges can be solved now"
+
+
+def is_no_formats_error(msg: str) -> bool:
+    low = (msg or "").lower()
+    return ("requested format is not available" in low or "no video formats found" in low
+            or "only images are available" in low or "n challenge" in low)
 
 
 def load_settings() -> dict:
@@ -148,7 +190,9 @@ def _meta_args(info: dict | None, fmt: str) -> list[str]:
 
 
 def _run_ffmpeg(cmd: list[str], data: bytes | None = None) -> bytes:
-    r = subprocess.run(cmd, input=data, capture_output=True, **_no_window())
+    # stdin=DEVNULL: inside a GUI (pythonw / YtubeViewer) an inherited stdin makes ffmpeg misread input
+    r = subprocess.run(cmd, input=data, capture_output=True,
+                       **({} if data is not None else {"stdin": subprocess.DEVNULL}), **_no_window())
     if r.returncode != 0:
         raise RuntimeError("ffmpeg failed: " + r.stderr.decode(errors="replace")[-500:])
     return r.stdout
@@ -306,7 +350,7 @@ def _get_engine(quality: str, log):
 def _media_duration(ffmpeg: str, src: str) -> float | None:
     """Duration in seconds parsed from ffmpeg's banner (no ffprobe needed)."""
     import re
-    r = subprocess.run([ffmpeg, "-hide_banner", "-i", src], capture_output=True, **_no_window())
+    r = subprocess.run([ffmpeg, "-hide_banner", "-i", src], capture_output=True, stdin=subprocess.DEVNULL, **_no_window())
     m = re.search(rb"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", r.stderr)
     if not m:
         return None
@@ -344,7 +388,7 @@ def filter_bgm(src: str, dst: str, fmt: str, bitrate: str, ffmpeg: str, quality:
 
     dec = subprocess.Popen([ffmpeg, "-v", "error", "-i", src, *_trim_args(t0, t1), "-vn",
                             "-f", "f32le", "-ac", "2", "-ar", str(sr), "-"],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_no_window())
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_no_window())
     enc = subprocess.Popen([ffmpeg, "-v", "error", "-y", "-f", "f32le", "-ac", "2", "-ar", str(sr),
                             "-i", "-", *_meta_args(info, fmt), *_codec_args(fmt, bitrate), dst],
                            stdin=subprocess.PIPE, stderr=subprocess.PIPE, **_no_window())
@@ -400,7 +444,33 @@ def filter_bgm(src: str, dst: str, fmt: str, bitrate: str, ffmpeg: str, quality:
 COOKIE_BROWSERS = ["firefox", "chrome", "edge", "brave", "chromium", "opera", "vivaldi"]
 
 
-def cookie_opts(cookies_browser: str | None = None, cookies_file: str | None = None) -> dict:
+_COOKIE_CHECK: dict = {}          # spec -> (time, error or None)
+COOKIE_NOTE = {"text": ""}         # last "fell back to signed-out" reason, for the GUIs
+
+
+def browser_cookies_error(spec: tuple) -> str | None:
+    """Try reading the browser's cookies once (cached 2 min). Returns the reason it fails, or None."""
+    hit = _COOKIE_CHECK.get(spec)
+    if hit and time.time() - hit[0] < 120:
+        return hit[1]
+    err = None
+    try:
+        from yt_dlp.cookies import extract_cookies_from_browser
+
+        class _Quiet:
+            def debug(self, m): pass
+            def info(self, m): pass
+            def warning(self, m, only_once=False): pass
+            def error(self, m): pass
+        extract_cookies_from_browser(spec[0], spec[1] if len(spec) > 1 else None, logger=_Quiet())
+    except Exception as ex:  # noqa: BLE001
+        err = explain_cookie_error(str(ex).replace("ERROR: ", ""))
+    _COOKIE_CHECK[spec] = (time.time(), err)
+    return err
+
+
+def cookie_opts(cookies_browser: str | None = None, cookies_file: str | None = None,
+                strict: bool = False, log=None) -> dict:
     """yt-dlp options that make requests as YOUR YouTube account (age-restricted, members-only,
     private/unlisted videos you can see, and fewer bot checks).
 
@@ -419,7 +489,16 @@ def cookie_opts(cookies_browser: str | None = None, cookies_file: str | None = N
         spec: tuple = (name.strip().lower(),)
         if profile.strip():
             spec += (profile.strip(),)
+        if not strict:
+            err = browser_cookies_error(spec)
+            if err:                      # unreadable (Chrome lock/encryption): carry on signed out
+                COOKIE_NOTE["text"] = f"not signed in - {spec[0]} cookies unreadable: {err}"
+                if log:
+                    log("WARN: " + COOKIE_NOTE["text"])
+                return {}
+        COOKIE_NOTE["text"] = ""
         return {"cookiesfrombrowser": spec}
+    COOKIE_NOTE["text"] = ""
     return {}
 
 
@@ -451,7 +530,7 @@ def youtube_check_login(cookies_browser=None, cookies_file=None) -> str:
     when the cookies sign in, raises with the reason otherwise."""
     import yt_dlp
     opts = {"extract_flat": True, "quiet": True, "no_warnings": True, "noprogress": True,
-            "skip_download": True, "playlist_items": "1-3", **cookie_opts(cookies_browser, cookies_file)}
+            "skip_download": True, "playlist_items": "1-3", **cookie_opts(cookies_browser, cookies_file, strict=True)}
     if not opts.get("cookiefile") and not opts.get("cookiesfrombrowser"):
         raise RuntimeError("no sign-in method selected")
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -461,6 +540,185 @@ def youtube_check_login(cookies_browser=None, cookies_file=None) -> str:
         raise RuntimeError("cookies were read, but YouTube did not treat them as signed in "
                            "(log in to youtube.com in that browser, then try again)")
     return f"signed in - subscriptions feed readable (latest: {entries[0].get('title', '')[:60]})"
+
+
+def explain_cookie_error(msg: str) -> str:
+    """Turn yt-dlp's cryptic browser-cookie failures into something actionable."""
+    low = (msg or "").lower()
+    if "could not copy" in low and "cookie" in low:
+        return ("the browser keeps its cookie database locked while it is running (Chrome/Edge on Windows), "
+                "and Chrome 127+ also encrypts cookies so other apps cannot read them. Use "
+                "'Open sign-in window' on the YouTube tab instead (or Firefox / a cookies.txt file).")
+    if "dpapi" in low or "app-bound" in low or ("decrypt" in low and "cookie" in low):
+        return ("the browser encrypts its cookies (Chrome 127+ app-bound encryption), so they cannot be "
+                "read from outside. Use 'Open sign-in window' on the YouTube tab instead "
+                "(or Firefox / a cookies.txt file).")
+    return msg
+
+
+# ---- sign-in through the app's own browser window (no cookie-database reading at all)
+# A Chrome/Edge window with its own profile is started with a local DevTools port; once you have
+# logged in to YouTube there, the cookies are asked from the running browser itself and written
+# to a cookies.txt. This sidesteps both the locked cookie database and app-bound encryption.
+SIGNIN_PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yt_signin_profile")
+SIGNIN_COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube_cookies.txt")
+SIGNIN_URL = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F"
+_signin_state: dict = {"port": None, "proc": None}
+
+
+def find_signin_browser() -> str | None:
+    """Path of a Chromium browser to host the sign-in window (Chrome, then Edge, then Brave)."""
+    cands = []
+    for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"), os.environ.get("LOCALAPPDATA")):
+        if base:
+            cands += [os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"),
+                      os.path.join(base, "Microsoft", "Edge", "Application", "msedge.exe"),
+                      os.path.join(base, "BraveSoftware", "Brave-Browser", "Application", "brave.exe")]
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    for name in ("chrome", "google-chrome", "chromium", "chromium-browser", "msedge", "microsoft-edge"):
+        w = shutil.which(name)
+        if w:
+            return w
+    return None
+
+
+def _devtools_json(port: int, path: str):
+    import json
+    import urllib.request
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=3) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def open_signin_window() -> str:
+    """Start (or re-focus) the sign-in browser window. Returns a status line."""
+    import socket
+    port = _signin_state.get("port")
+    if port:
+        try:
+            _devtools_json(port, "/json/version")
+            return "sign-in window is already open - log in there, then press 'Save sign-in'"
+        except Exception:
+            pass
+    exe = find_signin_browser()
+    if not exe:
+        raise RuntimeError("no Chrome / Edge / Brave found to open the sign-in window")
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        port = so.getsockname()[1]
+    os.makedirs(SIGNIN_PROFILE_DIR, exist_ok=True)
+    proc = subprocess.Popen([exe, f"--user-data-dir={SIGNIN_PROFILE_DIR}", f"--remote-debugging-port={port}",
+                             "--remote-debugging-address=127.0.0.1", "--no-first-run",
+                             "--no-default-browser-check", "--new-window", SIGNIN_URL])
+    _signin_state.update(port=port, proc=proc)
+    for _ in range(40):
+        try:
+            _devtools_json(port, "/json/version")
+            break
+        except Exception:
+            time.sleep(0.25)
+    return (f"opened {os.path.basename(exe)} - log in to YouTube in that window "
+            "(stays logged in next time), then press 'Save sign-in'")
+
+
+def _ws_call(ws_url: str, method: str, params: dict | None = None, timeout: float = 15.0) -> dict:
+    """One request/response over a DevTools websocket (tiny stdlib client, localhost only)."""
+    import base64
+    import json
+    import socket
+    import struct
+    import urllib.parse
+    u = urllib.parse.urlparse(ws_url)
+    s = socket.create_connection((u.hostname, u.port), timeout)
+    try:
+        key = base64.b64encode(os.urandom(16)).decode()
+        s.sendall((f"GET {u.path} HTTP/1.1\r\nHost: {u.hostname}:{u.port}\r\nUpgrade: websocket\r\n"
+                   f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            c = s.recv(4096)
+            if not c:
+                raise RuntimeError("DevTools closed the connection")
+            buf += c
+        head, buf = buf.split(b"\r\n\r\n", 1)
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            raise RuntimeError("DevTools refused the websocket: " + head.split(b"\r\n", 1)[0].decode(errors="replace"))
+        payload = json.dumps({"id": 1, "method": method, "params": params or {}}).encode()
+        n = len(payload)
+        hdr = bytes([0x81]) + (bytes([0x80 | n]) if n < 126 else
+                               bytes([0x80 | 126]) + struct.pack(">H", n) if n < 65536 else
+                               bytes([0x80 | 127]) + struct.pack(">Q", n))
+        mask = os.urandom(4)
+        s.sendall(hdr + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+        def read(k):
+            nonlocal buf
+            while len(buf) < k:
+                c = s.recv(65536)
+                if not c:
+                    raise RuntimeError("DevTools closed the connection")
+                buf += c
+            out, buf = buf[:k], buf[k:]
+            return out
+        msg = b""
+        while True:
+            b0, b1 = read(2)
+            ln = b1 & 0x7F
+            if ln == 126:
+                ln = struct.unpack(">H", read(2))[0]
+            elif ln == 127:
+                ln = struct.unpack(">Q", read(8))[0]
+            if b1 & 0x80:
+                m = read(4)
+                data = bytes(b ^ m[i % 4] for i, b in enumerate(read(ln)))
+            else:
+                data = read(ln)
+            op = b0 & 0x0F
+            if op == 8:
+                raise RuntimeError("DevTools closed the connection")
+            if op in (9, 10):
+                continue
+            msg += data
+            if b0 & 0x80:
+                obj = json.loads(msg.decode("utf-8"))
+                msg = b""
+                if obj.get("id") == 1:
+                    if "error" in obj:
+                        raise RuntimeError(f"DevTools {method}: {obj['error'].get('message')}")
+                    return obj.get("result") or {}
+    finally:
+        s.close()
+
+
+def save_signin_cookies(dest: str = SIGNIN_COOKIES_FILE) -> str:
+    """Pull the YouTube/Google cookies from the open sign-in window into a Netscape cookies.txt."""
+    port = _signin_state.get("port")
+    if not port:
+        raise RuntimeError("open the sign-in window first")
+    try:
+        ws = _devtools_json(port, "/json/version")["webSocketDebuggerUrl"]
+    except Exception:
+        raise RuntimeError("the sign-in window is closed - open it again (you stay logged in)") from None
+    cookies = _ws_call(ws, "Storage.getCookies").get("cookies") or []
+    keep = [c for c in cookies if c.get("domain", "").lstrip(".").endswith(("youtube.com", "google.com"))]
+    yt_login = [c for c in keep if c.get("domain", "").lstrip(".").endswith("youtube.com")
+                and c.get("name") in ("SAPISID", "__Secure-3PAPISID", "LOGIN_INFO")]
+    if not yt_login:      # Google cookies arrive first; wait until the redirect to youtube.com has set YouTube's
+        raise RuntimeError("not logged in yet - finish signing in to YouTube in the sign-in window first")
+    lines = ["# Netscape HTTP Cookie File", "# written by YtubeCatcher from its sign-in window", ""]
+    for c in keep:
+        dom = c["domain"]
+        exp = int(c.get("expires") or 0)
+        lines.append("\t".join([("#HttpOnly_" if c.get("httpOnly") else "") + dom,
+                                "TRUE" if dom.startswith(".") else "FALSE", c.get("path") or "/",
+                                "TRUE" if c.get("secure") else "FALSE", str(max(exp, 0)),
+                                c["name"], c.get("value", "")]))
+    tmp = dest + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, dest)
+    return f"saved {len(keep)} cookies to {os.path.basename(dest)}"
 
 
 # --------------------------------------------------------------------------- core
@@ -687,7 +945,7 @@ def dump_audio(inputs, out_dir, fmt="mp3", bitrate="192", start=None, end=None,
                     "progress_hooks": [hook],
                     "logger": _Logger(),
                     "noprogress": True,
-                    **cookie_opts(cookies_browser, cookies_file),
+                    **cookie_opts(cookies_browser, cookies_file, log=log),
                 })
             log(f"==> {src}")
             info = ydl.extract_info(src, download=True)
@@ -725,7 +983,7 @@ def dump_audio(inputs, out_dir, fmt="mp3", bitrate="192", start=None, end=None,
 def _video_size(ffmpeg: str, src: str):
     """(width, height) of the first video stream, parsed from ffmpeg's banner."""
     import re
-    r = subprocess.run([ffmpeg, "-hide_banner", "-i", src], capture_output=True, **_no_window())
+    r = subprocess.run([ffmpeg, "-hide_banner", "-i", src], capture_output=True, stdin=subprocess.DEVNULL, **_no_window())
     m = re.search(rb"Video:.*?\s(\d{2,5})x(\d{2,5})", r.stderr)
     return (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
 
@@ -879,7 +1137,7 @@ def dump_video(inputs, out_dir, resolution="best", start=None, end=None, playlis
                     "progress_hooks": [hook],
                     "logger": _Logger(),
                     "noprogress": True,
-                    **cookie_opts(cookies_browser, cookies_file),
+                    **cookie_opts(cookies_browser, cookies_file, log=log),
                 })
             log(f"==> {src}")
             info = ydl.extract_info(src, download=True)
@@ -928,7 +1186,7 @@ def is_video_file(ffmpeg: str, path: str) -> bool:
         return True
     if ext in AUDIO_EXT:
         return False
-    r = subprocess.run([ffmpeg, "-hide_banner", "-i", path], capture_output=True, **_no_window())
+    r = subprocess.run([ffmpeg, "-hide_banner", "-i", path], capture_output=True, stdin=subprocess.DEVNULL, **_no_window())
     return b"Video:" in r.stderr and b"attached pic" not in r.stderr
 
 
@@ -1157,14 +1415,16 @@ class _Preview:
             try:
                 decode_wav(self.ffmpeg, path, wav, t0, PREVIEW_AUDIO_SEG)
             except Exception as ex:  # noqa: BLE001
-                self.post(lambda: self._fail(gen, str(ex)))
+                err = str(ex)
+                self.post(lambda: self._fail(gen, err))
                 return
             proc = None
             if self.is_video:
                 proc = subprocess.Popen([self.ffmpeg, "-v", "error", "-ss", str(t0), "-i", path, "-an",
                                          "-t", str(PREVIEW_AUDIO_SEG), "-r", str(PREVIEW_FPS),
                                          "-vf", _scale_filter(W, PREVIEW_H), "-f", "image2pipe", "-vcodec", "ppm", "-"],
-                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_no_window())
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        **_no_window())
                 first = _read_ppm(proc.stdout)          # have a frame ready before the clock starts
                 if first is not None:
                     self.frames.put((gen, t0, first))
@@ -1627,7 +1887,7 @@ def run_gui():
                        progress=lambda p, t: q.put(("prog", (p, t))), **kw)
             q.put(("done", files))
         except Exception as ex:  # noqa: BLE001
-            q.put(("err", str(ex)))
+            q.put(("err", explain_cookie_error(str(ex))))
 
     def start():
         items = [ln.strip() for ln in urls_txt.get("1.0", "end").splitlines() if ln.strip()]
@@ -1682,9 +1942,9 @@ def run_gui():
                     value="browser").grid(row=1, column=0, sticky="w")
     ttk.Combobox(acct, textvariable=cookies_browser_var, values=COOKIE_BROWSERS, width=18).grid(row=1, column=1, sticky="w", padx=4)
     ttk.Label(acct, foreground="gray", text="(logged in to youtube.com there; ':Profile 2' = other profile)").grid(row=1, column=2, columnspan=2, sticky="w")
-    ttk.Label(acct, foreground="gray", text="Firefox is the most reliable. Chrome/Edge on current Windows encrypt "
-              "their cookies and may refuse - then export a cookies.txt with a browser extension "
-              "(e.g. 'Get cookies.txt LOCALLY') and use the file option:", wraplength=900, justify="left").grid(row=2, column=0, columnspan=4, sticky="w", pady=(2, 4))
+    ttk.Label(acct, foreground="gray", text="Chrome/Edge on Windows lock and encrypt their cookies, so reading them usually fails "
+              "('Could not copy Chrome cookie database'). Firefox works; for Chrome use the sign-in window "
+              "below, or export a cookies.txt with a browser extension (e.g. 'Get cookies.txt LOCALLY'):", wraplength=900, justify="left").grid(row=2, column=0, columnspan=4, sticky="w", pady=(2, 4))
     ttk.Radiobutton(acct, text="Sign in with an exported cookies.txt file:", variable=cookies_mode_var,
                     value="file").grid(row=3, column=0, sticky="w")
     ttk.Entry(acct, textvariable=cookies_file_var).grid(row=3, column=1, columnspan=2, sticky="ew", padx=4)
@@ -1697,8 +1957,45 @@ def run_gui():
     ttk.Button(acct, text="Browse...", command=pick_cookies).grid(row=3, column=3, sticky="e")
     login_var = tk.StringVar(value="")
     login_btn = ttk.Button(acct, text="Test sign-in")
-    login_btn.grid(row=4, column=0, sticky="w", pady=(6, 0))
-    ttk.Label(acct, textvariable=login_var).grid(row=4, column=1, columnspan=3, sticky="w", pady=(6, 0))
+    login_btn.grid(row=5, column=0, sticky="w", pady=(6, 0))
+    ttk.Label(acct, textvariable=login_var, wraplength=900, justify="left").grid(row=5, column=1, columnspan=3, sticky="w", pady=(6, 0))
+
+    # sign-in window: log in once in an app-owned Chrome/Edge window, then pull its cookies live
+    sw = ttk.Frame(acct)
+    sw.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
+    ttk.Label(sw, text="Or sign in inside a dedicated browser window (works with Chrome/Edge):").pack(side="left")
+    open_sw_btn = ttk.Button(sw, text="1. Open sign-in window")
+    open_sw_btn.pack(side="left", padx=(8, 4))
+    save_sw_btn = ttk.Button(sw, text="2. Save sign-in")
+    save_sw_btn.pack(side="left", padx=4)
+
+    def open_signin():
+        def work():
+            try:
+                msg = open_signin_window()
+            except Exception as ex:  # noqa: BLE001
+                msg = "FAILED: " + str(ex)
+            q.put(("call", lambda: (login_var.set(msg), log("Sign-in window: " + msg))))
+        threading.Thread(target=work, daemon=True).start()
+
+    def save_signin():
+        def work():
+            try:
+                msg = save_signin_cookies()
+                ok = True
+            except Exception as ex:  # noqa: BLE001
+                msg, ok = str(ex), False
+            def show():
+                login_var.set(("" if ok else "FAILED: ") + msg)
+                log("Sign-in window: " + msg)
+                if ok:
+                    cookies_file_var.set(SIGNIN_COOKIES_FILE)
+                    cookies_mode_var.set("file")
+                    test_login()
+            q.put(("call", show))
+        threading.Thread(target=work, daemon=True).start()
+    open_sw_btn.configure(command=open_signin)
+    save_sw_btn.configure(command=save_signin)
 
     def test_login():
         if cookies_mode_var.get() == "none":
@@ -1713,7 +2010,7 @@ def run_gui():
                 msg = youtube_check_login(**kw)
                 ok = True
             except Exception as ex:  # noqa: BLE001
-                msg, ok = str(ex).replace("ERROR: ", "")[-220:], False
+                msg, ok = explain_cookie_error(str(ex).replace("ERROR: ", ""))[-300:], False
             def show():
                 login_btn.state(["!disabled"])
                 login_var.set(("OK: " if ok else "FAILED: ") + msg)
@@ -1768,7 +2065,7 @@ def run_gui():
                 res = youtube_search(query, limit, **kw)
                 err = None
             except Exception as ex:  # noqa: BLE001
-                res, err = [], str(ex).replace("ERROR: ", "")[-300:]
+                res, err = [], explain_cookie_error(str(ex).replace("ERROR: ", ""))[-400:]
             def show():
                 search_btn.state(["!disabled"])
                 results.clear()
@@ -1781,7 +2078,8 @@ def run_gui():
                     search_status.set("Search failed: " + err)
                     log("YouTube search failed: " + err)
                 else:
-                    search_status.set(f"{len(res)} result(s) for '{query}'. Select rows and add them, or double-click one.")
+                    search_status.set(f"{len(res)} result(s) for '{query}'. Select rows and add them, or double-click one."
+                                      + (f"  [{COOKIE_NOTE['text'][:90]}...]" if COOKIE_NOTE["text"] else ""))
             q.put(("call", show))
         threading.Thread(target=work, daemon=True).start()
     search_btn.configure(command=do_search)
