@@ -560,6 +560,15 @@ class Tooltip:
             self.tip = None
 
 
+def popup_above(menu, widget) -> None:
+    """Open a menu just above the widget that opened it (measured, so it never covers the widget)."""
+    menu.update_idletasks()
+    y = widget.winfo_rooty() - menu.winfo_reqheight() - px(6)
+    if y < 0:                                   # no room above: open below instead
+        y = widget.winfo_rooty() + widget.winfo_height() + px(6)
+    menu.tk_popup(widget.winfo_rootx(), y)
+
+
 def icon_button(parent, icon: str, command, size: int = 40, bg: str = BG, fg: str = TXT,
                 tip: str = "", hover: str = "#3a3a3a", icon_size: float | None = None):
     """Round, hover-highlighted icon button (like YouTube's player controls). size is in design px."""
@@ -881,7 +890,8 @@ def run_gui(initial_url: str | None = None):
     prog = tk.Canvas(xr2, height=px(6), bg=SURF, highlightthickness=0)
     prog.pack(side="left", fill="x", expand=True, padx=px(12))
     prog_var = tk.StringVar(value="")
-    tk.Label(xr2, textvariable=prog_var, bg=SURF, fg=SUB, font=F(9), width=34, anchor="e").pack(side="right")
+    prog_lbl = tk.Label(xr2, textvariable=prog_var, bg=SURF, fg=SUB, font=F(9), width=34, anchor="e")
+    prog_lbl.pack(side="right")
     outs = tk.Frame(card, bg=SURF)
     outs.pack(fill="x", padx=px(14), pady=(0, px(10)))
 
@@ -1225,7 +1235,7 @@ def run_gui(initial_url: str | None = None):
             for v in SPEEDS:
                 m.add_radiobutton(label="Normal" if v == "1.0" else f"{v}x", value=v, variable=speed_var,
                                   command=set_speed)
-        m.tk_popup(e.widget.winfo_rootx(), e.widget.winfo_rooty() - 10 - 26 * m.index("end"))
+        popup_above(m, e.widget)
 
     def set_speed():
         setp("speed", float(speed_var.get()))
@@ -1420,7 +1430,7 @@ def run_gui(initial_url: str | None = None):
         for r in (yc.RESOLUTIONS if yc else ["best", "1080", "720"]):
             m.add_command(label=("Best available" if r == "best" else r + "p") + ("   ✓" if ex["res"] == r else ""),
                           command=lambda r=r: setr(r))
-        m.tk_popup(e.widget.winfo_rootx(), e.widget.winfo_rooty() - 10 - 24 * (m.index("end") + 1))
+        popup_above(m, e.widget)
 
     def set_mode(k):
         if k == "voice" and not filt["ok"]:
@@ -1502,7 +1512,7 @@ def run_gui(initial_url: str | None = None):
             m.add_separator()
         for p in ("0", "0.2", "0.3", "0.5", "1.0"):
             m.add_command(label=f"Pad clips {p} s" + ("   ✓" if ex["pad"] == p else ""), command=lambda p=p: setv("pad", p))
-        m.tk_popup(e.widget.winfo_rootx(), e.widget.winfo_rooty() - 10 - 24 * (m.index("end") + 1))
+        popup_above(m, e.widget)
 
     def pick_folder():
         from tkinter import filedialog
@@ -1781,6 +1791,9 @@ def run_gui(initial_url: str | None = None):
         t = tk.Label(txt, text=r["title"], bg=BG, fg=TXT, font=F(10, True, r["title"]), anchor="nw",
                      justify="left", wraplength=px(215))
         t.pack(fill="x")
+        # wrap titles to the space the sidebar really has (a fixed wraplength cut long titles off)
+        txt.bind("<Configure>", lambda e, t=t: t.configure(wraplength=max(px(80), e.width - px(4)))
+                 if abs(int(t.cget("wraplength")) - (e.width - px(4))) > 2 else None)
         ch_ = r.get("channel") or ""
         c = tk.Label(txt, text=ch_, bg=BG, fg=SUB, font=F(9, False, ch_), anchor="w")
         c.pack(fill="x", pady=(px(4), 0))
@@ -1877,7 +1890,10 @@ def run_gui(initial_url: str | None = None):
                     status_var.set(str(val)[-240:])
                 elif kind == "xprog":
                     draw_prog((val[0] or 0) / 100.0)
-                    prog_var.set(str(val[1])[:60])
+                    t_, room = str(val[1]), max(px(80), prog_lbl.winfo_width() - px(6))
+                    while len(t_) > 4 and F(9).measure(t_) > room:       # trim to the pixels there are
+                        t_ = t_[:-2].rstrip() + "…" if not t_.endswith("…") else t_[:-3].rstrip() + "…"
+                    prog_var.set(t_)
                 elif kind == "xdone":
                     extract_finished(files=val)
                 elif kind == "xerr":
