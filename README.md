@@ -14,12 +14,45 @@ One window, no web browser, no API key. Runs locally on Windows.
 
 <p align="center"><img src="docs/workflow.svg" alt="1 Search, 2 Watch, 3 Mark clips with I and O, 4 Extract as voice only, audio or video" width="100%"></p>
 
-1. **Search** YouTube from the top bar, or paste a link (or a local video file). Results appear on the right with thumbnails, length, channel and views.
+1. **Search** YouTube from the top bar, or paste a link. To play a video or audio file from your computer, click the **folder button** next to search. Results appear on the right with thumbnails, length, channel and views. Your recent searches and recently played videos are one click away.
 2. **Watch** in the built-in player (mpv). yt-dlp finds the stream; quality goes up to 4K, and there's an audio-only option.
-3. **Mark clips** with <kbd>I</kbd> (in) and <kbd>O</kbd> (out). Each clip shows up green on the seek bar. Use <kbd>,</kbd> <kbd>.</kbd> to step one frame for exact cuts, and <kbd>L</kbd> to loop a clip and check it.
+3. **Mark clips** with <kbd>I</kbd> (in) and <kbd>O</kbd> (out). Each clip shows up green on the seek bar. For exact cuts, pause and step with <kbd>←</kbd> <kbd>→</kbd> one frame at a time, or switch on **frame-by-frame mode** (<kbd>E</kbd>). <kbd>L</kbd> loops a clip so you can check it.
 4. **Extract** as *Voice only*, *Audio* or *Video*. Several clips are joined into **one file**; with no clips, the whole video is saved.
 
 ## Features
+
+### Search results and Recent
+
+<img src="docs/screenshots/sidebar-tabs.png" alt="Sidebar tabs: search results with recent-search chips, and the Recent list with clip counts" width="80%">
+
+The sidebar has two tabs:
+
+- **Search results**: your *recent searches* appear as chips above the results. Click one to run it again, right-click to remove it.
+- **Recent**: the videos you've played, newest first, with each video's clip count and when you watched it. Click one to reopen it with its clips, or use × to remove it.
+
+Both lists are kept between sessions, and thumbnails are cached.
+
+### Play files from your computer
+
+Click the **folder button** next to the search button (or press <kbd>Ctrl</kbd>+<kbd>O</kbd>) and pick a video or audio file: MP4, MKV, WEBM, MOV, AVI, MP3, M4A, WAV, FLAC and more. You can also paste a file path into the search box. Local files work like YouTube videos: mark clips, take screenshots, and extract voice only, audio or video. They also appear in *Recent*, with a thumbnail taken from the video.
+
+### Screenshots of any frame
+
+<img src="docs/screenshots/screenshot-bar.png" alt="Camera button in the control bar and a saved screenshot in the output list" width="100%">
+
+Pause on the frame you want (step with <kbd>←</kbd> <kbd>→</kbd> or frame-by-frame mode), then click the **camera button** or press <kbd>S</kbd>. The frame is saved as a PNG at the video's own resolution (up to 4K, not the size of the window) in `Screenshots` inside your save folder. It's named after the video and the exact time, for example `Evening skyline … [1-59.5].png`. If the video is playing, it pauses first so you get the frame you see. Saved pictures appear in the list under the panel: click one to open it, or click the folder icon to show it in Explorer.
+
+### Frame-by-frame mode
+
+<img src="docs/screenshots/frame-mode.png" alt="Frame-by-frame mode: film-strip button active, time shown in milliseconds with the frame number" width="100%">
+
+Press <kbd>E</kbd> or click the film-strip button to turn it on or off. While it's on:
+
+- the video pauses, and <kbd>←</kbd> <kbd>→</kbd> step exactly **one frame** (<kbd>Shift</kbd>: 10 frames);
+- the time readout shows milliseconds and the **frame number**;
+- IN/OUT marks keep the exact frame time (for example `1:01.367`) instead of rounding to 0.1 s, and the cut uses those exact times.
+
+Even with the mode off, <kbd>←</kbd> <kbd>→</kbd> step one frame whenever the video is paused.
 
 ### Clips and one-click extraction
 
@@ -65,11 +98,13 @@ Later launches start straight away. `run.bat` also updates yt-dlp each time, bec
 | Key | Action | Key | Action |
 |---|---|---|---|
 | <kbd>Space</kbd> / <kbd>K</kbd> | Play / pause | <kbd>I</kbd> | Mark clip IN |
-| <kbd>←</kbd> <kbd>→</kbd> | Back / forward 5 s | <kbd>O</kbd> | Mark clip OUT |
-| <kbd>Shift</kbd>+<kbd>←</kbd> <kbd>→</kbd> | Back / forward 1 s | <kbd>L</kbd> | Loop the selected clip (again: stop) |
+| <kbd>←</kbd> <kbd>→</kbd> | Back / forward 5 s; **one frame** when paused or in frame mode | <kbd>O</kbd> | Mark clip OUT |
+| <kbd>Shift</kbd>+<kbd>←</kbd> <kbd>→</kbd> | Back / forward 1 s (frame mode: 10 frames) | <kbd>L</kbd> | Loop the selected clip (again: stop) |
 | <kbd>J</kbd> | Back 10 s | <kbd>Del</kbd> | Delete the selected clip |
 | <kbd>,</kbd> <kbd>.</kbd> | Previous / next frame | <kbd>M</kbd> | Mute |
-| <kbd>F</kbd> / double-click | Full screen (<kbd>Esc</kbd> to leave) | <kbd>Enter</kbd> | Search / open the pasted link |
+| <kbd>F</kbd> / double-click | Full screen: player only (<kbd>Esc</kbd> to leave) | <kbd>Enter</kbd> | Search / open the pasted link |
+| <kbd>E</kbd> | Frame-by-frame mode on / off | <kbd>S</kbd> | Screenshot of the current frame |
+| <kbd>Ctrl</kbd>+<kbd>O</kbd> | Play a file from your computer | | |
 
 ## Output
 
@@ -79,9 +114,10 @@ Files go to `Music\YtubeCatcher` in your user folder unless you pick another fol
 Evening skyline — relaxing mountain timelapse (4K) (3 clips) (voice).mp3
 Evening skyline — relaxing mountain timelapse (4K) (3 clips).mp4
 Evening skyline — relaxing mountain timelapse (4K).m4a
+Screenshots\Evening skyline — relaxing mountain timelapse (4K) [1-59.5].png
 ```
 
-Title and artist metadata are embedded in audio files.
+Title and artist metadata are embedded in audio files. Screenshots go to the `Screenshots` subfolder.
 
 ## More ways to use it
 

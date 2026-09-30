@@ -5,8 +5,8 @@ Search YouTube, watch, mark IN/OUT clips on the seek bar, then Extract them as v
 (BGM filtered out), audio or video - the cutting/filtering is done by ytubecatcher.py.
 
 Needs:  pip install mpv   +   libmpv-2.dll next to this file (run.bat does both).
-Keys:   Space/K play/pause   Left/Right -5/+5 s   Shift+Left/Right -1/+1 s   J -10 s   , . frame step
-        I mark IN   O mark OUT   L loop clip   Del delete clip   M mute   F fullscreen
+Keys:   Space/K play/pause   Left/Right -5/+5 s (paused: one frame)   Shift+Left/Right -1/+1 s   J -10 s   , . frame step
+        E frame-by-frame mode   S screenshot   Ctrl+O open a file   I mark IN   O mark OUT   L loop clip   Del delete clip   M mute   F fullscreen
 """
 from __future__ import annotations
 
@@ -51,6 +51,17 @@ def save_json(path: str, data) -> None:
         os.replace(tmp, path)
     except Exception:
         pass
+
+
+def fmt_precise(secs) -> str:
+    """seconds -> 'm:ss.mmm' (trailing zeros dropped): frame-accurate clip times."""
+    secs = max(0.0, round(float(secs), 3))
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    s_txt = f"{s:06.3f}".rstrip("0").rstrip(".")
+    if len(s_txt) < 2 or s_txt[1] == ".":
+        s_txt = "0" + s_txt
+    return f"{int(h)}:{int(m):02d}:{s_txt}" if h else f"{int(m)}:{s_txt}"
 
 
 def fmt_time(secs) -> str:
@@ -507,6 +518,24 @@ def draw_icon(cv, name: str, cx: float, cy: float, size: float, color: str):
     elif name == "logo":
         _rrect(cv, *P(1, 4.5, 23, 19.5), 5 * k, fill=RED, outline="")
         cv.create_polygon(P(9.5, 8, 16.5, 12, 9.5, 16), fill="white", outline="white")
+    elif name == "camera":
+        cv.create_polygon(P(8, 6, 9.5, 3.5, 14.5, 3.5, 16, 6), fill=color, outline=color, joinstyle="round")
+        cv.create_polygon(P(2.5, 6, 21.5, 6, 21.5, 19.5, 2.5, 19.5), fill="", outline=color, width=w,
+                          joinstyle="round")
+        cv.create_oval(P(8, 8.5, 16, 16.5), outline=color, width=w)
+        cv.create_oval(P(17.6, 7.8, 19.4, 9.6), fill=color, outline="")
+    elif name == "open":
+        cv.create_polygon(P(2.5, 5, 9, 5, 11, 7.5, 21.5, 7.5, 21.5, 19.5, 2.5, 19.5), fill="", outline=color,
+                          width=w, joinstyle="round")
+        cv.create_line(P(12, 10.5, 12, 17), fill=color, width=w)
+        cv.create_line(P(8.7, 13.75, 15.3, 13.75), fill=color, width=w)
+    elif name == "film":
+        cv.create_rectangle(P(3, 5, 21, 19), fill="", outline=color, width=w)
+        for y_ in (6.8, 15.2):
+            for x_ in (5.2, 9.4, 13.6, 17.8):
+                cv.create_rectangle(P(x_ - 0.9, y_ - 0.9, x_ + 0.9, y_ + 0.9), fill=color, width=0)
+        cv.create_line(P(3, 9.5, 21, 9.5), fill=color, width=w * 0.7)
+        cv.create_line(P(3, 14.5, 21, 14.5), fill=color, width=w * 0.7)
     elif name == "download":
         cv.create_line(P(12, 3, 12, 15), fill=color, width=w * 1.2)
         cv.create_polygon(P(6.5, 10, 12, 16, 17.5, 10), fill=color, outline=color)
@@ -576,18 +605,21 @@ def icon_button(parent, icon: str, command, size: int = 40, bg: str = BG, fg: st
     s = px(size)
     frac = (icon_size / size) if icon_size else 0.55
     cv = tk.Canvas(parent, width=s, height=s, bg=bg, highlightthickness=0, bd=0, cursor="hand2")
-    cv.icon = icon
+    cv.icon, cv.fg, cv.ring = icon, fg, None
 
     def draw(hot=False):
         cv.delete("all")
-        img = icon_img(cv.icon, s, fg, circle=hover if hot else None, icon_frac=frac)
+        circle = hover if hot else cv.ring
+        img = icon_img(cv.icon, s, cv.fg, circle=circle, icon_frac=frac)
         if img:
             cv.create_image(s / 2, s / 2, image=img)
             return
-        if hot:
-            cv.create_oval(2, 2, s - 2, s - 2, fill=hover, outline="")
-        draw_icon(cv, cv.icon, s / 2, s / 2, s * frac, fg)
+        if circle:
+            cv.create_oval(2, 2, s - 2, s - 2, fill=circle, outline="")
+        draw_icon(cv, cv.icon, s / 2, s / 2, s * frac, cv.fg)
     cv.set_icon = lambda name: (setattr(cv, "icon", name), draw())
+    cv.set_active = lambda on, col=RED, ring="#3a1016": (setattr(cv, "fg", col if on else fg),
+                                                          setattr(cv, "ring", ring if on else None), draw())
     cv.bind("<Enter>", lambda e: draw(True))
     cv.bind("<Leave>", lambda e: draw(False))
     cv.bind("<ButtonRelease-1>", lambda e: command() if 0 <= e.x < s and 0 <= e.y < s else None)
@@ -681,8 +713,58 @@ def fetch_thumb_png(video_id: str, w: int, h: int) -> bytes | None:
         return None
 
 
+def fmt_ago(t) -> str:
+    try:
+        d = max(0, time.time() - float(t))
+    except (TypeError, ValueError):
+        return ""
+    for sec, unit in ((86400 * 365, "year"), (86400 * 30, "month"), (86400 * 7, "week"), (86400, "day"),
+                      (3600, "hour"), (60, "minute")):
+        if d >= sec:
+            n = int(d // sec)
+            return f"{n} {unit}{'s' if n != 1 else ''} ago"
+    return "just now"
+
+
 def qual_label(v: str) -> str:
     return "Audio" if v == "audio only" else f"{v}p"
+
+
+def local_thumb_png(path: str, w: int, h: int) -> bytes | None:
+    """A frame from a local video (or a waveform-ish placeholder for audio) as a rounded PNG."""
+    yc = catcher()
+    ff = yc.find_ffmpeg() if yc else shutil.which("ffmpeg")
+    if not ff or not os.path.isfile(path):
+        return None
+    for ss in ("5", "0"):
+        try:
+            r = subprocess.run([ff, "-loglevel", "error", "-ss", ss, "-i", path, "-frames:v", "1",
+                                "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}",
+                                "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
+                               capture_output=True, stdin=subprocess.DEVNULL, timeout=20, **_no_window())
+        except Exception:
+            return None
+        if r.stdout:
+            try:
+                import io
+                from PIL import Image, ImageDraw
+                im = Image.open(io.BytesIO(r.stdout)).convert("RGBA")
+                mask = Image.new("L", (w * 4, h * 4), 0)
+                ImageDraw.Draw(mask).rounded_rectangle((0, 0, w * 4 - 1, h * 4 - 1),
+                                                       radius=max(4, w // 21) * 4, fill=255)
+                im.putalpha(mask.resize((w, h), Image.LANCZOS))
+                out = io.BytesIO()
+                im.save(out, "PNG")
+                return out.getvalue()
+            except Exception:
+                return r.stdout
+    return None
+
+
+def safe_name(text: str, limit: int = 80) -> str:
+    bad = '<>:"/\\|?*\n\r\t'
+    t = "".join("_" if c in bad else c for c in (text or "")).strip(" .")
+    return (t[:limit].rstrip(" .") or "frame")
 
 
 def fmt_views(n) -> str:
@@ -755,6 +837,9 @@ def run_gui(initial_url: str | None = None):
     s_btn = icon_button(sb_in, "search", lambda: go_search(), size=34, bg=SURF2, hover="#3a3a3a",
                         tip="Search, or paste a video URL (Enter)")
     s_btn.pack(side="left", padx=(px(1), px(1)), pady=1, ipadx=px(10))
+    open_btn = icon_button(sbox, "open", lambda: open_file(), size=40, bg=BG, hover=SURF2,
+                           tip="Play a video or audio file from your computer (Ctrl+O)")
+    open_btn.pack(side="left", padx=(px(10), 0))
 
     # =========================================================== body: player | results
     body = tk.Frame(root, bg=BG)
@@ -784,10 +869,14 @@ def run_gui(initial_url: str | None = None):
     CB = dict(bg="black", size=44, hover="#2b2b2b")
     play_btn = icon_button(bar, "play", lambda: toggle(), tip="Play / Pause (Space)", **CB)
     play_btn.pack(side="left")
-    icon_button(bar, "back", lambda: rel_seek(-10), tip="Back 10 s (Left = 5 s)", **CB).pack(side="left")
-    icon_button(bar, "fwd", lambda: rel_seek(10), tip="Forward 10 s (Right = 5 s)", **CB).pack(side="left")
+    icon_button(bar, "back", lambda: rel_seek(-10), tip="Back 10 s   (Left: 5 s, or 1 frame when paused)", **CB).pack(side="left")
+    icon_button(bar, "fwd", lambda: rel_seek(10), tip="Forward 10 s   (Right: 5 s, or 1 frame when paused)", **CB).pack(side="left")
     icon_button(bar, "frame_back", lambda: cmd("frame_back_step"), tip="Previous frame (,)", **CB).pack(side="left")
     icon_button(bar, "frame_fwd", lambda: cmd("frame_step"), tip="Next frame (.)", **CB).pack(side="left")
+    frames_btn = icon_button(bar, "film", lambda: toggle_frames(), tip="Frame-by-frame mode (E)", **CB)
+    frames_btn.pack(side="left")
+    shot_btn = icon_button(bar, "camera", lambda: take_screenshot(), tip="Screenshot of the current frame (S)", **CB)
+    shot_btn.pack(side="left")
     vol_btn = icon_button(bar, "volume", lambda: toggle_mute(), tip="Mute (M)", **CB)
     vol_btn.pack(side="left")
     vol = tk.Canvas(bar, width=px(90), height=px(44), bg="black", highlightthickness=0, cursor="hand2")
@@ -896,17 +985,35 @@ def run_gui(initial_url: str | None = None):
     outs.pack(fill="x", padx=px(14), pady=(0, px(10)))
 
     status_var = tk.StringVar(value="")
-    tk.Label(col, textvariable=status_var, bg=BG, fg=SUB, font=F(9), anchor="w", justify="left",
-             wraplength=px(900)).pack(fill="x", pady=(px(8), 0))
+    status_lbl = tk.Label(col, textvariable=status_var, bg=BG, fg=SUB, font=F(9), anchor="w", justify="left",
+                          wraplength=px(900))
+    status_lbl.pack(fill="x", pady=(px(8), 0))
 
     # ---------------- results sidebar
     side_head = tk.Frame(side, bg=BG)
     side_head.pack(fill="x")
-    res_title = tk.StringVar(value="Search results")
-    tk.Label(side_head, textvariable=res_title, bg=BG, fg=TXT, font=F(12, True), anchor="w").pack(side="left")
+    res_title = tk.StringVar(value="Search results")       # label of the Results tab
+    tabs = {}
+    for key_, var_or_text in (("results", res_title), ("recent", "Recent")):
+        tf = tk.Frame(side_head, bg=BG, cursor="hand2")
+        tf.pack(side="left", padx=(0, px(18)))
+        kw_ = {"textvariable": var_or_text} if isinstance(var_or_text, tk.StringVar) else {"text": var_or_text}
+        tl = tk.Label(tf, bg=BG, fg=TXT, font=F(12, True), anchor="w", cursor="hand2", **kw_)
+        tl.pack(anchor="w")
+        bar_ = tk.Frame(tf, bg=BG, height=px(3))
+        bar_.pack(fill="x", pady=(px(4), 0))
+        for w_ in (tf, tl):
+            w_.bind("<Button-1>", lambda e, k=key_: show_tab(k))
+        tabs[key_] = (tl, bar_)
+    clear_recent_lbl = tk.Label(side_head, text="Clear", bg=BG, fg=SUB, font=F(9), cursor="hand2")
+    clear_recent_lbl.bind("<Button-1>", lambda e: clear_recent())
+    Tooltip(clear_recent_lbl, "Forget the recently played list")
+    tk.Frame(side, bg=LINE, height=1).pack(fill="x")
     search_status = tk.StringVar(value="Search above, or paste a YouTube link.")
     tk.Label(side, textvariable=search_status, bg=BG, fg=SUB, font=F(9), anchor="w", justify="left",
-             wraplength=px(390)).pack(fill="x", pady=(px(2), px(8)))
+             wraplength=px(390)).pack(fill="x", pady=(px(6), px(8)))
+    hist_box = tk.Frame(side, bg=BG)                  # recent searches (Results tab)
+    hist_box.pack(fill="x")
     lst = tk.Canvas(side, bg=BG, highlightthickness=0)
     lst.pack(fill="both", expand=True)
     inner = tk.Frame(lst, bg=BG)
@@ -1127,7 +1234,7 @@ def run_gui(initial_url: str | None = None):
         if state["url"]:                              # park the old video's open IN mark with that video
             pending_in[video_key(state["url"])] = state["in"]
         state.update({"url": url, "title": "", "in": pending_in.get(video_key(url)), "dur": None, "pos": None,
-                      "loop": None, "sel": None, "ready": False})
+                      "loop": None, "sel": None, "ready": False, "meta": meta_info or {}, "dur_saved": False})
         try:
             player.pause = True             # old video frozen; I/O are refused until the new one has loaded
             player["ab-loop-a"] = "no"
@@ -1177,6 +1284,7 @@ def run_gui(initial_url: str | None = None):
             state["title"] = r.get("title") or ""
             title_var.set(state["title"])
             root.title(f"{state['title']} - {APP_NAME}")
+            add_recent(url, state["title"])
             note = yc.COOKIE_NOTE["text"] if yc else ""
             status_var.set((r.get("desc") or "")
                            + ("   |   signed out: browser cookies unreadable - use Sign in > Open sign-in window"
@@ -1208,20 +1316,31 @@ def run_gui(initial_url: str | None = None):
     def toggle_fullscreen():
         state["fs"] = not state["fs"]
         if state["fs"]:
-            top.pack_forget()
+            for w in (top, meta, card, status_lbl):
+                w.pack_forget()
             side.grid_remove()
-            meta.pack_forget()
-            card.pack_forget()
+            body.columnconfigure(1, minsize=0)       # the hidden sidebar must not keep its column width
+            body.grid_columnconfigure(0, weight=1)
+            col.grid_configure(columnspan=2)
             body.pack_configure(padx=0, pady=0)
+            root.configure(bg="black")
+            body.configure(bg="black")
+            col.configure(bg="black")
             root.attributes("-fullscreen", True)
         else:
             root.attributes("-fullscreen", False)
+            root.configure(bg=BG)
+            body.configure(bg=BG)
+            col.configure(bg=BG)
+            col.grid_configure(columnspan=1)
+            body.columnconfigure(1, minsize=px(410))
             body.pack_forget()
             top.pack(fill="x")
             body.pack(fill="both", expand=True, padx=(px(24), px(12)), pady=(px(4), px(12)))
             side.grid()
             meta.pack(fill="x", pady=(px(12), 0))
             card.pack(fill="x", pady=(px(12), 0))
+            status_lbl.pack(fill="x", pady=(px(8), 0))
         fs_btn.set_icon("unfullscreen" if state["fs"] else "fullscreen")
 
     def pop_menu(e, which):
@@ -1268,9 +1387,10 @@ def run_gui(initial_url: str | None = None):
             dot.pack(side="left", padx=(px(10), px(8)), pady=px(7))
             lb = tk.Label(row, text=f"Clip {i + 1}", bg=rbg, fg=TXT, font=F(10, True), anchor="w", width=6)
             lb.pack(side="left")
-            tk.Label(row, text=f"{fmt_time(a)}  –  {fmt_time(b)}", bg=rbg, fg=TXT, font=F(10)).pack(side="left",
+            tk.Label(row, text=f"{fmt_precise(a)}  –  {fmt_precise(b)}", bg=rbg, fg=TXT, font=F(10)).pack(side="left",
                                                                                               padx=px(8))
-            tk.Label(row, text=f"{b - a:.1f} s", bg=rbg, fg=SUB, font=F(9)).pack(side="left", padx=px(12))
+            tk.Label(row, text=(f"{b - a:.1f} s" if abs((b - a) * 10 - round((b - a) * 10)) < 1e-6
+                               else f"{b - a:.3f} s"), bg=rbg, fg=SUB, font=F(9)).pack(side="left", padx=px(12))
             icon_button(row, "trash", lambda i=i: del_clip(i), size=30, bg=rbg, hover="#444444",
                         tip="Delete clip").pack(side="right", padx=px(4))
             icon_button(row, "loop", lambda i=i: loop_clip(i), size=30, bg=rbg, hover="#444444",
@@ -1298,7 +1418,7 @@ def run_gui(initial_url: str | None = None):
         if t is None or not_ready():
             return
         state["in"] = float(t)
-        in_var.set("IN " + fmt_time(t))
+        in_var.set("IN " + (fmt_precise(t) if state.get("frames") else fmt_time(t)))
         draw_seek()
 
     def mark_out():
@@ -1310,18 +1430,20 @@ def run_gui(initial_url: str | None = None):
             status_var.set("Mark IN first (I), then OUT (O).")
             return
         a, b = sorted((a, float(t)))
-        if b - a < 0.2:
+        if b - a < (0.03 if state.get("frames") else 0.2):
             status_var.set("Clip too short.")
             return
-        clips().append((round(a, 1), round(b, 1)))
+        nd = 3 if state.get("frames") else 1          # frame mode keeps the exact frame time
+        a, b = round(a, nd), round(b, nd)
+        clips().append((a, b))
         clips().sort()
         state["in"] = None
-        state["sel"] = clips().index((round(a, 1), round(b, 1)))
+        state["sel"] = clips().index((a, b))
         ex["whole"] = False
         in_var.set("")
         refresh_clips()
         persist()
-        status_var.set(f"Clip added: {fmt_time(a)} - {fmt_time(b)}")
+        status_var.set(f"Clip added: {fmt_precise(a)} - {fmt_precise(b)}")
 
     def loop_clip(i=None):
         if i is None:
@@ -1541,7 +1663,7 @@ def run_gui(initial_url: str | None = None):
             status_var.set("Play a video first, mark clips (I / O), then Extract.")
             return
         cl = [] if use_whole() else list(clips())
-        timeline = [(None, fmt_time(a), fmt_time(b)) for a, b in cl] or None
+        timeline = [(None, fmt_precise(a), fmt_precise(b)) for a, b in cl] or None
         try:
             pad = float(ex["pad"])
         except ValueError:
@@ -1595,20 +1717,83 @@ def run_gui(initial_url: str | None = None):
             return
         draw_prog(1.0)
         prog_var.set(f"Done - {len(files)} file{'s' if len(files) != 1 else ''}")
-        for w in outs.winfo_children():
-            w.destroy()
         for f in files[-6:]:
-            r = tk.Frame(outs, bg=SURF)
-            r.pack(fill="x", pady=1)
-            icon_label(r, "check", px(16), CLIP, SURF).pack(side="left", padx=(px(2), 0))
-            lb = tk.Label(r, text=os.path.basename(f), bg=SURF, fg=TXT, font=F(9, False, os.path.basename(f)),
-                          anchor="w", cursor="hand2")
-            lb.pack(side="left", padx=px(6))
+            add_output_row(f)
+        status_var.set("Saved to " + ex["out_dir"])
+
+    def add_output_row(f, kind="file"):
+        r = tk.Frame(outs, bg=SURF)
+        r.pack(fill="x", pady=1)
+        icon_label(r, "camera" if kind == "shot" else "check", px(16), CLIP, SURF).pack(side="left",
+                                                                                     padx=(px(2), 0))
+        name = os.path.basename(f)
+        lb = tk.Label(r, text=name, bg=SURF, fg=TXT, font=F(9, False, name), anchor="w", cursor="hand2")
+        lb.pack(side="left", padx=px(6))
+        if kind == "shot":
+            Tooltip(lb, "Click to open the picture")
+            lb.bind("<Button-1>", lambda e, f=f: open_path(f))
+        else:
             Tooltip(lb, "Click to preview in the player")
             lb.bind("<Button-1>", lambda e, f=f: play(f))
-            icon_button(r, "folder", lambda f=f: show_in_folder(f), size=28, bg=SURF, hover=SURF2,
-                        tip="Show in folder").pack(side="left")
-        status_var.set("Saved to " + ex["out_dir"])
+        icon_button(r, "folder", lambda f=f: show_in_folder(f), size=28, bg=SURF, hover=SURF2,
+                    tip="Show in folder").pack(side="left")
+        kids = outs.winfo_children()
+        for w in kids[:-6]:                          # keep the list short
+            w.destroy()
+
+    def open_path(f):
+        try:
+            if os.name == "nt":
+                os.startfile(f)  # noqa: S606
+            else:
+                subprocess.Popen(["xdg-open", f])
+        except Exception as ex_:  # noqa: BLE001
+            status_var.set(str(ex_))
+
+    def take_screenshot():
+        """Save the frame on screen at the video's own resolution (PNG), into <folder>/Screenshots."""
+        if not player or not state.get("ready") or not getp("duration"):
+            status_var.set("Play a video first, then pause on the frame you want and press S.")
+            return
+        if not getp("pause"):
+            setp("pause", True)                      # freeze on this frame, so what you see is what you get
+        t = getp("time_pos") or 0.0
+        folder = os.path.join(ex["out_dir"], "Screenshots")
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as ex_:
+            status_var.set(f"Cannot create {folder}: {ex_}")
+            return
+        stamp = fmt_precise(t).replace(":", "-")
+        name_ = state["title"] or os.path.basename(state["url"])
+        if not state["url"].lower().startswith(("http://", "https://")):
+            name_ = os.path.splitext(name_)[0]                 # "clip.mp4" -> "clip"
+        base = safe_name(name_)
+        path = os.path.join(folder, f"{base} [{stamp}].png")
+        n = 2
+        while os.path.exists(path):
+            path = os.path.join(folder, f"{base} [{stamp}] ({n}).png")
+            n += 1
+        try:
+            player.command("screenshot-to-file", path, "video")
+        except Exception as ex_:  # noqa: BLE001
+            status_var.set("Screenshot failed: " + str(ex_))
+            return
+        fr = getp("estimated_frame_number")
+        w_, h_ = getp("width"), getp("height")
+        add_output_row(path, "shot")
+        status_var.set(f"Screenshot saved ({w_}x{h_}" + (f", frame {fr}" if fr is not None else "") + f"): {path}")
+
+    def open_file():
+        from tkinter import filedialog
+        exts = " ".join(f"*{e}" for e in sorted(yc.MEDIA_EXT)) if yc else "*.mp4 *.mkv *.webm *.mov *.mp3 *.m4a *.wav"
+        start = st.get("last_dir") or os.path.expanduser("~")
+        f = filedialog.askopenfilename(title="Play a file", initialdir=start if os.path.isdir(start) else None,
+                                       filetypes=[("Video / audio", exts), ("All files", "*.*")])
+        if f:
+            st["last_dir"] = os.path.dirname(f)
+            query_var.set(f)
+            play(os.path.normpath(f))
 
     def show_in_folder(f):
         try:
@@ -1732,6 +1917,10 @@ def run_gui(initial_url: str | None = None):
             return
         search_gen[0] += 1
         gen = search_gen[0]
+        view["tab"] = "results"
+        add_search(text)
+        paint_tabs()
+        render_history()
         res_title.set("Searching...")
         search_status.set(f"Looking for '{text}' on YouTube...")
         ck = cookie_settings()
@@ -1745,29 +1934,147 @@ def run_gui(initial_url: str | None = None):
         threading.Thread(target=work, daemon=True).start()
         persist()
 
+    view = {"tab": "results", "search": None}          # search = (text, err) of the last search
+    recent: list[dict] = [r_ for r_ in (st.get("recent") or []) if isinstance(r_, dict) and r_.get("url")]
+    searches: list[str] = [q_ for q_ in (st.get("searches") or []) if isinstance(q_, str) and q_.strip()]
+
+    def add_search(text):
+        searches[:] = [text] + [q_ for q_ in searches if q_.lower() != text.lower()][:14]
+
+    def remove_search(text):
+        searches[:] = [q_ for q_ in searches if q_ != text]
+        persist()
+        render_history()
+
+    def run_search(text):
+        query_var.set(text)
+        go_search()
+
+    def render_history():
+        """Recent searches as chips (click = search again, right-click = remove)."""
+        for w in hist_box.winfo_children():
+            w.destroy()
+        if view["tab"] != "results" or not searches:
+            hist_box.pack_forget()                 # an emptied frame would keep its old height
+            return
+        hist_box.pack(fill="x", pady=(0, px(8)), before=lst)
+        head = tk.Frame(hist_box, bg=BG)
+        head.pack(fill="x", pady=(0, px(4)))
+        tk.Label(head, text="Recent searches", bg=BG, fg=SUB, font=F(9)).pack(side="left")
+        cl_ = tk.Label(head, text="Clear", bg=BG, fg=SUB, font=F(9), cursor="hand2")
+        cl_.pack(side="right")
+        cl_.bind("<Button-1>", lambda e: (searches.clear(), persist(), render_history()))
+        width = max(side.winfo_width(), px(380))
+        h_ = px(28)
+        line, used = None, width
+        for q_ in searches[:10]:
+            label = q_ if len(q_) <= 28 else q_[:27] + "…"
+            w_ = int(F(9).measure(label) + round(h_ * 0.5) + h_ * 0.95 + px(8)) + px(6)   # pill width + gap
+            if line is None or used + w_ > width:
+                line = tk.Frame(hist_box, bg=BG)
+                line.pack(fill="x", pady=px(2))
+                used = 0
+            chip = pill_button(line, label, lambda e, t=q_: run_search(t), icon="search", parent_bg=BG,
+                               height=28, font_size=9, bold=False,
+                               tip=f"Search '{q_}' again  (right-click: remove)")
+            chip.pack(side="left", padx=(0, px(6)))
+            chip.bind("<Button-3>", lambda e, t=q_: remove_search(t))
+            used += w_
+    thumb_png: dict[str, bytes] = {}                      # video id -> PNG, so switching tabs doesn't refetch
+
     def show_results(gen, text, res, err):
         if gen != search_gen[0]:
             return
         results.clear()
         results.extend(res)
+        view.update(tab="results", search=(text, err))
+        res_title.set("Search results")
+        render_list()
+
+    def paint_tabs():
+        for k_, (tl, bar_) in tabs.items():
+            on = view["tab"] == k_
+            tl.configure(fg=TXT if on else SUB)
+            bar_.configure(bg=TXT if on else BG)
+        if view["tab"] == "recent" and recent:
+            clear_recent_lbl.pack(side="right", pady=(0, px(6)))
+        else:
+            clear_recent_lbl.pack_forget()
+
+    def show_tab(k):
+        view["tab"] = k
+        render_list()
+
+    def render_list():
+        """Fill the sidebar with the search results or the recently played videos."""
+        search_gen[0] += 1
+        gen = search_gen[0]
         thumbs.clear()
         for w in inner.winfo_children():
             w.destroy()
         rows.clear()
         lst.yview_moveto(0)
-        res_title.set(f"Results for '{text}'" if not err else "Search failed")
-        note = yc.COOKIE_NOTE["text"] if yc else ""
-        search_status.set(err if err else f"{len(res)} videos - click one to play"
-                          + ("   (signed out: browser cookies unreadable - use Sign in at the top right)" if note else ""))
-        for i, r in enumerate(res):
-            build_row(i, r)
-        threading.Thread(target=load_thumbs, args=(gen, list(enumerate(res))), daemon=True).start()
+        paint_tabs()
+        render_history()
+        if view["tab"] == "results":
+            items = list(results)
+            if view["search"] is None:
+                search_status.set("Search above, or paste a YouTube link.")
+            else:
+                text, err = view["search"]
+                note = yc.COOKIE_NOTE["text"] if yc else ""
+                search_status.set(err if err else f"{len(items)} videos for '{text}' - click one to play"
+                                  + ("   (signed out: browser cookies unreadable - use Sign in at the top right)"
+                                     if note else ""))
+        else:
+            items = list(recent)
+            search_status.set(f"{len(items)} recently played - click one to play it again" if items
+                              else "Videos you play show up here.")
+        for i, r in enumerate(items):
+            build_row(i, r, recent_row=view["tab"] == "recent")
+        threading.Thread(target=load_thumbs, args=(gen, list(enumerate(items))), daemon=True).start()
         highlight_result()
+
+    def add_recent(url, title):
+        """Remember a video that just started playing (newest first, one entry per video)."""
+        key = video_key(url)
+        old = next((r_ for r_ in recent if video_key(r_["url"]) == key), {})
+        meta = state.get("meta") or {}
+        vid = key[3:] if key.startswith("yt:") else None
+        local = not url.lower().startswith(("http://", "https://"))
+        entry = {"url": url, "id": vid, "title": title or old.get("title") or os.path.basename(url),
+                 "channel": meta.get("channel") or old.get("channel")
+                 or (f"Local file  ·  {os.path.basename(os.path.dirname(url)) or os.path.dirname(url)}" if local else ""),
+                 "duration": meta.get("duration") or old.get("duration") or "",
+                 "views": meta.get("views") or old.get("views") or 0, "t": time.time()}
+        recent[:] = [entry] + [r_ for r_ in recent if video_key(r_["url"]) != key][:59]
+        persist()
+        if view["tab"] == "recent":
+            render_list()
+
+    def recent_set_duration(dur):
+        key = video_key(state["url"])
+        for r_ in recent:
+            if video_key(r_["url"]) == key and not r_.get("duration") and dur:
+                r_["duration"] = fmt_time(dur).split(".")[0]
+                persist()
+                return
+
+    def remove_recent(url):
+        recent[:] = [r_ for r_ in recent if video_key(r_["url"]) != video_key(url)]
+        persist()
+        render_list()
+
+    def clear_recent():
+        if recent and messagebox.askyesno(APP_NAME, "Clear the recently played list?\n\n(Your clips are kept.)"):
+            recent.clear()
+            persist()
+            render_list()
 
     TW, TH = px(168), px(94)
     rows: list = []
 
-    def build_row(i, r):
+    def build_row(i, r, recent_row=False):
         row = tk.Frame(inner, bg=BG, cursor="hand2")
         row.pack(fill="x", pady=px(4))
         th = tk.Canvas(row, width=TW, height=TH, bg=BG, highlightthickness=0)
@@ -1787,7 +2094,7 @@ def run_gui(initial_url: str | None = None):
                 th.create_rectangle(TW - m - tw, TH - m - bh, TW - m, TH - m, fill="#000000", width=0, tags="badge")
             th.create_text(TW - m - tw / 2, TH - m - bh / 2, text=r["duration"], fill="white", font=f, tags="badge")
         txt = tk.Frame(row, bg=BG)
-        txt.pack(side="left", fill="both", expand=True, padx=(px(10), 0))
+        txt.pack(side="left", fill="both", expand=True, padx=(px(10), px(26) if recent_row else 0))
         t = tk.Label(txt, text=r["title"], bg=BG, fg=TXT, font=F(10, True, r["title"]), anchor="nw",
                      justify="left", wraplength=px(215))
         t.pack(fill="x")
@@ -1797,13 +2104,25 @@ def run_gui(initial_url: str | None = None):
         ch_ = r.get("channel") or ""
         c = tk.Label(txt, text=ch_, bg=BG, fg=SUB, font=F(9, False, ch_), anchor="w")
         c.pack(fill="x", pady=(px(4), 0))
-        v = tk.Label(txt, text=fmt_views(r.get("views")), bg=BG, fg=SUB, font=F(9), anchor="w")
+        if recent_row:
+            n_clips = len(clips_by_url.get(video_key(r["url"])) or [])
+            bits = [f"{n_clips} clip{'s' if n_clips != 1 else ''}" if n_clips else "", fmt_ago(r.get("t"))]
+            info = "  •  ".join(b_ for b_ in bits if b_)
+        else:
+            info = fmt_views(r.get("views"))
+        v = tk.Label(txt, text=info, bg=BG, fg=CLIP if recent_row and "clip" in info else SUB, font=F(9), anchor="w")
         v.pack(fill="x")
         widgets = (row, th, txt, t, c, v)
+        if recent_row:
+            rm = icon_button(row, "close", lambda u=r["url"]: remove_recent(u), size=26, bg=BG, fg=SUB,
+                             hover="#3a3a3a", tip="Remove from Recent", icon_size=12)
+            rm.place(relx=1.0, x=-px(2), y=px(2), anchor="ne")
 
         def paint(bg):
             for w in (row, txt, t, c, v, th):
                 w.configure(bg=bg)
+            if recent_row:
+                rm.configure(bg=bg)
         for w in widgets:
             w.bind("<Enter>", lambda e: paint(SURF2) if state.get("hl") != i else None)
             w.bind("<Leave>", lambda e: paint(BG) if state.get("hl") != i else None)
@@ -1823,10 +2142,16 @@ def run_gui(initial_url: str | None = None):
 
         def one(it):
             i, r = it
-            if gen != search_gen[0] or not r.get("id"):
+            if gen != search_gen[0]:
                 return
-            png = fetch_thumb_png(r["id"], TW, TH)
+            key_ = r.get("id") or r.get("url")
+            if not key_:
+                return
+            png = thumb_png.get(key_)
+            if not png:
+                png = fetch_thumb_png(r["id"], TW, TH) if r.get("id") else local_thumb_png(r["url"], TW, TH)
             if png:
+                thumb_png[key_] = png
                 q.put(("thumb", (gen, i, png)))
         with ThreadPoolExecutor(6) as ex:
             list(ex.map(one, items))
@@ -1849,14 +2174,46 @@ def run_gui(initial_url: str | None = None):
     q_entry.bind("<Return>", go_search)
 
     # =========================================================== keys (not while typing)
+    def arrow(direction: int, shift: bool):
+        """Frame mode: one frame (Shift: 10 frames). Otherwise: paused -> one frame, playing -> 5 s
+        (Shift: 1 s)."""
+        if not (player and getp("duration")):
+            return
+        if state.get("frames"):
+            if not getp("pause"):
+                setp("pause", True)
+            if shift:
+                fps = getp("container_fps") or getp("estimated_vf_fps") or 30.0
+                try:
+                    player.seek(direction * 10.0 / float(fps), reference="relative", precision="exact")
+                except Exception:
+                    pass
+            else:
+                cmd("frame_step" if direction > 0 else "frame_back_step")
+        elif not shift and getp("pause"):
+            cmd("frame_step" if direction > 0 else "frame_back_step")
+        else:
+            rel_seek(direction * (1 if shift else 5))
+
+    def toggle_frames():
+        state["frames"] = not state.get("frames")
+        frames_btn.set_active(state["frames"])
+        if state["frames"]:
+            setp("pause", True)
+            status_var.set("Frame-by-frame mode: ← → one frame, Shift+← → 10 frames, I / O mark on the exact frame"
+                           "  (E to leave)")
+        else:
+            status_var.set("Frame-by-frame mode off")
+        refresh_clips()
+
     def key(e):
         if isinstance(e.widget, tk.Entry):
             return
         k, shift = e.keysym.lower(), bool(e.state & 0x1)
         acts = {"space": toggle, "k": toggle, "m": toggle_mute, "comma": lambda: cmd("frame_back_step"),
                 "period": lambda: cmd("frame_step"), "i": mark_in, "o": mark_out, "l": loop_toggle,
-                "delete": del_clip, "f": toggle_fullscreen,
-                "left": lambda: rel_seek(-1 if shift else -5), "right": lambda: rel_seek(1 if shift else 5),
+                "delete": del_clip, "f": toggle_fullscreen, "e": toggle_frames, "s": take_screenshot,
+                "left": lambda: arrow(-1, shift), "right": lambda: arrow(1, shift),
                 "j": lambda: rel_seek(-10)}
         if k == "escape" and state["fs"]:
             toggle_fullscreen()
@@ -1865,6 +2222,8 @@ def run_gui(initial_url: str | None = None):
             acts[k]()
             return "break"
     root.bind_all("<KeyPress>", key)
+    root.bind_all("<Control-o>", lambda e: (open_file(), "break")[1])
+    root.bind_all("<Control-O>", lambda e: (open_file(), "break")[1])
     video.bind("<Button-1>", lambda e: root.focus_set())
     video.bind("<Double-Button-1>", lambda e: toggle_fullscreen())
 
@@ -1874,7 +2233,8 @@ def run_gui(initial_url: str | None = None):
         save_json(VIEWER_SETTINGS, {"geometry": root.geometry() if not state["fs"] else st.get("geometry"),
                                     "geometry_scale": UI["scale"],
                                     "query": query_var.get(), "quality": qual_var.get(),
-                                    "volume": vol_val[0], "clips": keep, "extract": ex,
+                                    "volume": vol_val[0], "clips": keep, "extract": ex, "recent": recent, "searches": searches,
+                                    "last_dir": st.get("last_dir"),
                                     **({"account": st["account"]} if st.get("account") else {})})
 
     tick_n = [0]
@@ -1922,9 +2282,17 @@ def run_gui(initial_url: str | None = None):
         if player:
             state["pos"] = getp("time_pos")
             state["dur"] = getp("duration")
+            if state["dur"] and state.get("ready") and not state.get("dur_saved"):
+                state["dur_saved"] = True
+                recent_set_duration(state["dur"])
             buf = "   buffering..." if getp("paused_for_cache") else ""
-            time_var.set(f"{fmt_time(state['pos'] or 0).split('.')[0]} / "
-                         f"{fmt_time(state['dur'] or 0).split('.')[0]}{buf}")
+            if state.get("frames"):
+                fr = getp("estimated_frame_number")
+                time_var.set(f"{fmt_precise(state['pos'] or 0)} / {fmt_time(state['dur'] or 0).split('.')[0]}"
+                             + (f"   ·   frame {fr}" if fr is not None else "") + buf)
+            else:
+                time_var.set(f"{fmt_time(state['pos'] or 0).split('.')[0]} / "
+                             f"{fmt_time(state['dur'] or 0).split('.')[0]}{buf}")
             pz = bool(getp("pause")) or not state["dur"]
             if pz != last_pause[0]:
                 play_btn.set_icon("play" if pz else "pause")
@@ -1985,6 +2353,7 @@ def run_gui(initial_url: str | None = None):
                                  "install it with: winget install DenoLand.Deno"))
         threading.Thread(target=work, daemon=True).start()
     root.after(1500, ensure_deno)
+    render_list()
     update_account()
     refresh_extract()
     refresh_clips()
