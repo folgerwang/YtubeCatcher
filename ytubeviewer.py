@@ -27,7 +27,8 @@ APP_USER_MODEL_ID = "folgerwang.YtubeCatcher"
 RUNTIME_PY = os.path.join(HERE, "runtime", "python.exe")
 INSTALLED = os.path.isfile(RUNTIME_PY)
 QUALITIES = ["360", "480", "720", "1080", "1440", "2160", "audio only"]
-SPEEDS = ["0.5", "0.75", "1.0", "1.25", "1.5", "2.0"]
+SPEEDS = ["0.1", "0.25", "0.5", "0.75", "1.0", "1.25", "1.5", "2.0", "3.0", "4.0", "5.0"]
+SPEED_MIN, SPEED_MAX = 0.1, 5.0
 CACHE_DIR = os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or HERE, "YtubeCatcher-cache")
 # mpv cache profiles. "ahead": keep downloading the whole video while it plays (packets spill to a temp file,
 # so a long 1080p video does not sit in RAM) and keep what was already watched, so seeking back is instant.
@@ -1259,6 +1260,7 @@ def run_gui(initial_url: str | None = None):
           "out_dir": ex_st.get("out_dir") or ysaved.get("out_dir") or (yc.DEFAULT_OUT if yc else HERE)}
     filt = {"ok": bool(yc and yc.bgm_filter_available()), "proc": None}
     ex["whole"] = False                               # True = save the whole video even when clips exist
+    ex["merge"] = bool(ex_st.get("merge", True))      # several clips: True = one joined file, False = one file each
     if ex["mode"] == "voice" and not filt["ok"]:
         ex["mode"] = "audio"
     tk.Frame(card, bg=LINE, height=1).pack(fill="x", padx=px(14))
@@ -1290,8 +1292,12 @@ def run_gui(initial_url: str | None = None):
     whole_chip = pill_button(xr2, "Whole video", lambda e: set_scope(True), tip="Save the entire video", **CH)
     whole_chip.pack(side="left", padx=px(2))
     clips_chip = pill_button(xr2, "Clips", lambda e: set_scope(False),
-                             tip="Save only the marked clips (several clips are joined into one file)", **CH)
+                             tip="Save only the marked clips", **CH)
     clips_chip.pack(side="left", padx=px(2))
+    merge_chip = pill_button(xr2, "Merge into 1 file", lambda e: set_merge(True),
+                             tip="Join all clips, in order, into one file", **CH)
+    split_chip = pill_button(xr2, "Separate files", lambda e: set_merge(False),
+                             tip="Save every clip as its own file", **CH)   # packed by update_scope (2+ clips)
     folder_chip = pill_button(xr2, "", lambda e: pick_folder(), icon="folder", tip="Save to (click to change)",
                               **CH)
     folder_chip.pack(side="left", padx=(px(16), 0))
@@ -1520,6 +1526,10 @@ def run_gui(initial_url: str | None = None):
         player = mpvmod.MPV(wid=str(video.winfo_id()), ytdl=False, osc=False, keep_open="yes",
                             input_default_bindings=False, input_vo_keyboard=False, cursor_autohide=1000,
                             hwdec="auto-safe", volume=vol_val[0], log_handler=mpv_log, loglevel="warn")
+        try:        # default scaletempo2 mutes audio below 0.25x: widen it to the full speed range
+            player["af"] = f"scaletempo2=min-speed={SPEED_MIN:g}:max-speed={SPEED_MAX:g}"
+        except Exception:
+            pass
         player.register_event_callback(mpv_event)
         try:                                    # big read-ahead goes to a temp file (deleted by mpv on close)
             os.makedirs(CACHE_DIR, exist_ok=True)
@@ -1766,9 +1776,19 @@ def run_gui(initial_url: str | None = None):
             m.add_radiobutton(label="Audio only", value="audio only", variable=qual_var, command=requality)
         else:
             for v in SPEEDS:
-                m.add_radiobutton(label="Normal" if v == "1.0" else f"{v}x", value=v, variable=speed_var,
+                m.add_radiobutton(label="Normal" if v == "1.0" else f"{float(v):g}x", value=v, variable=speed_var,
                                   command=set_speed)
+            m.add_separator()
+            m.add_command(label=f"Custom ({SPEED_MIN:g}x - {SPEED_MAX:g}x)...", command=custom_speed)
         popup_above(m, e.widget)
+
+    def custom_speed():
+        from tkinter import simpledialog
+        v = simpledialog.askfloat(APP_NAME, f"Playback speed ({SPEED_MIN:g} - {SPEED_MAX:g}):", parent=root,
+                                  initialvalue=float(speed_var.get()), minvalue=SPEED_MIN, maxvalue=SPEED_MAX)
+        if v is not None:
+            speed_var.set(f"{round(v, 2):g}" if round(v, 2) != 1 else "1.0")
+            set_speed()
 
     def set_speed():
         setp("speed", float(speed_var.get()))
@@ -1941,10 +1961,17 @@ def run_gui(initial_url: str | None = None):
 
     def update_scope():
         n = len(clips())
-        clips_chip.text = ("Clips  (mark with I / O)" if n == 0 else "1 clip" if n == 1
-                           else f"{n} clips  →  1 file")
+        clips_chip.text = ("Clips  (mark with I / O)" if n == 0 else "1 clip" if n == 1 else f"{n} clips")
         paint_chip(whole_chip, use_whole())
         paint_chip(clips_chip, not use_whole())
+        if n > 1 and not use_whole():
+            merge_chip.pack(side="left", padx=(px(10), px(2)), before=folder_chip)
+            split_chip.pack(side="left", padx=px(2), before=folder_chip)
+            paint_chip(merge_chip, ex["merge"])
+            paint_chip(split_chip, not ex["merge"])
+        else:
+            merge_chip.pack_forget()
+            split_chip.pack_forget()
         if n == 0:                                    # nothing to pick yet: looks like a hint, still clickable
             clips_chip.colors = (SURF, SURF2, SUB)
             clips_chip.redraw()
@@ -1955,6 +1982,11 @@ def run_gui(initial_url: str | None = None):
             return
         ex["whole"] = whole
         update_scope()
+
+    def set_merge(merge: bool):
+        ex["merge"] = merge
+        update_scope()
+        persist()
 
     def res_menu(e):
         m = tk.Menu(root, **menu_kw)
@@ -2082,7 +2114,7 @@ def run_gui(initial_url: str | None = None):
             pad = float(ex["pad"])
         except ValueError:
             pad = 0.0
-        common = dict(out_dir=ex["out_dir"], combine=len(cl) > 1, gap=0.5,
+        common = dict(out_dir=ex["out_dir"], combine=len(cl) > 1 and ex["merge"], gap=0.5,
                       timeline=timeline, pad=pad if cl else 0.0, **cookie_settings(),
                       log=lambda m: q.put(("xlog", m)),
                       progress=lambda p, t: q.put(("xprog", (p, t))))
@@ -2092,7 +2124,9 @@ def run_gui(initial_url: str | None = None):
         go_chip.colors = ("#5a5a5a", "#5a5a5a", "white")
         go_chip.redraw()
         draw_prog(0.01)
-        what = f"{len(cl)} clip{'s' if len(cl) != 1 else ''}" if cl else "the whole video"
+        what = (f"{len(cl)} clip{'s' if len(cl) != 1 else ''}"
+                + ("" if len(cl) < 2 else " -> 1 file" if ex["merge"] else " -> separate files")
+                if cl else "the whole video")
         prog_var.set(f"Starting - {what}...")
         url = state["url"]
 
@@ -2131,7 +2165,7 @@ def run_gui(initial_url: str | None = None):
             return
         draw_prog(1.0)
         prog_var.set(f"Done - {len(files)} file{'s' if len(files) != 1 else ''}")
-        for f in files[-6:]:
+        for f in files[-12:]:
             add_output_row(f)
         status_var.set("Saved to " + ex["out_dir"])
 

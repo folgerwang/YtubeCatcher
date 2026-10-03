@@ -15,9 +15,9 @@ One window, no web browser, no API key. Runs locally on Windows.
 <p align="center"><img src="docs/workflow.svg?v=3" alt="1 Search, 2 Watch, 3 Mark clips with I and O, 4 Extract as voice only, audio or video" width="100%"></p>
 
 1. **Search** YouTube from the top bar, or paste a link. To play a video or audio file from your computer, click the **folder button** next to search. Results appear on the right with thumbnails, length, channel and views. Your recent searches and recently played videos are one click away.
-2. **Watch** in the built-in player (mpv). yt-dlp finds the stream; quality goes up to 4K, and there's an audio-only option.
+2. **Watch** in the built-in player (mpv). yt-dlp finds the stream; quality goes up to 4K, and there's an audio-only option. Playback speed goes from 0.1x to 5x (presets, or type your own value).
 3. **Mark clips** with <kbd>I</kbd> (in) and <kbd>O</kbd> (out). Each clip shows up green on the seek bar. For exact cuts, pause and step with <kbd>←</kbd> <kbd>→</kbd> one frame at a time, or switch on **frame-by-frame mode** (<kbd>E</kbd>). <kbd>L</kbd> loops a clip so you can check it.
-4. **Extract** as *Voice only*, *Audio* or *Video*. Several clips are joined into **one file**; with no clips, the whole video is saved.
+4. **Extract** as *Voice only*, *Audio* or *Video*. Several clips are either merged into **one file** or saved as **separate files**, your choice; with no clips, the whole video is saved.
 
 ## Features
 
@@ -63,7 +63,7 @@ Even with the mode off, <kbd>←</kbd> <kbd>→</kbd> step one frame whenever th
 
 - **Every video keeps its own clips.** Switch to another video and its clips (and an unfinished IN mark) are put aside; switch back and they return. Clips are saved between sessions, and the same video opened through any kind of link shares them.
 - **Save as:** *Voice only*, *Audio* (MP3 / M4A / WAV / FLAC / OPUS with your choice of bitrate) or *Video* (MP4).
-- **Part:** *Whole video*, or *N clips → 1 file*. Clips are joined in order with a 0.5 s gap. Each clip is padded (0.3 s by default) so no word gets cut in half.
+- **Part:** *Whole video*, or *N clips*. With two or more clips, pick *Merge into 1 file* (joined in order with a 0.5 s gap) or *Separate files* (one file per clip). Each clip is padded (0.3 s by default) so no word gets cut in half.
 - Finished files are listed under the panel. Click one to play it back in the player, or click the folder icon to show it in Explorer.
 
 ### Voice only: background music removed
@@ -76,7 +76,7 @@ The **BGM filter** separates the voice from music and effects using the **BS-RoF
 
 <img src="docs/screenshots/video-resolution.png?v=3" alt="Video mode with the Resolution menu open" width="100%">
 
-In *Video* mode, the **Resolution** menu sets the download resolution: best available, or 2160p down to 360p. Cuts are frame-accurate, and clips are combined into one MP4.
+In *Video* mode, the **Resolution** menu sets the download resolution: best available, or 2160p down to 360p. Cuts are frame-accurate, and clips are saved as one merged MP4 or one MP4 per clip.
 
 ### Sign in with your YouTube account
 
