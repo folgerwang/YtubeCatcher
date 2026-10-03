@@ -2883,8 +2883,10 @@ def run_gui(initial_url: str | None = None):
     root.bind_all("<KeyPress>", key)
     root.bind_all("<Control-o>", lambda e: (open_file(), "break")[1])
     root.bind_all("<Control-O>", lambda e: (open_file(), "break")[1])
-    video.bind("<Button-1>", lambda e: root.focus_set())
-    video.bind("<Double-Button-1>", lambda e: toggle_fullscreen())
+    # Click toggles pause immediately (like YouTube); a double click undoes that toggle so it
+    # only switches fullscreen.
+    video.bind("<Button-1>", lambda e: (root.focus_set(), toggle()))
+    video.bind("<Double-Button-1>", lambda e: (toggle(), toggle_fullscreen()))
 
     # =========================================================== loop
     def persist():
